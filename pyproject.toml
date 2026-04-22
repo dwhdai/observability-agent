@@ -1,7 +1,20 @@
 [project]
 name = "observability-agent"
 version = "0.1.0"
-description = "Add your description here"
+description = "SRE copilot — observability TUI + AI agent"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "textual>=0.50.0",
+    "textual-plotext>=0.2.0",
+    "plotext>=5.2.0",
+    "openai>=1.0.0",
+    "watchfiles>=0.20.0",
+]
+
+[project.scripts]
+observability-agent = "observability_agent.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
