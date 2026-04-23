@@ -1,13 +1,9 @@
 """Synthetic metric + log generator with two anomaly scenarios."""
 
-from __future__ import annotations
-
 import random
 import sqlite3
 import threading
 import time
-from collections import defaultdict
-from typing import Optional
 
 SERVICES = ["api-gateway", "payment-service", "user-service", "inventory-service"]
 METRICS = ["latency_p99", "error_rate", "req_per_sec", "cpu_usage"]
@@ -236,7 +232,7 @@ def _compute_metric(service: str, metric: str, minutes: float, scenario: int) ->
 
 def _anomaly_log(
     service: str, minutes: float, scenario: int
-) -> Optional[tuple[str, str]]:
+) -> tuple[str, str] | None:
     """Return (level, message) if an anomaly log should be injected, else None."""
     if scenario == 1:
         if service == "payment-service" and minutes >= 15 and random.random() < 0.35:
@@ -314,8 +310,8 @@ def _gen_log(
 
 # ── Module-level scenario state (shared between backfill + stream) ───────────
 
-_demo_epoch: Optional[float] = None
-_scenario: Optional[int] = None
+_demo_epoch: float | None = None
+_scenario: int | None = None
 _state_lock = threading.Lock()
 
 
@@ -329,7 +325,7 @@ def _ensure_scenario(minutes: int = 30) -> tuple[float, int]:
         return _demo_epoch, _scenario
 
 
-def reset_scenario(scenario: Optional[int] = None) -> None:
+def reset_scenario(scenario: int | None = None) -> None:
     """Force a new scenario (call before backfill on fresh start).
 
     Args:
@@ -367,8 +363,7 @@ def backfill(db_path: str, minutes: int = 30, resolution_sec: int = 5) -> None:
                 log_rows.append(_gen_log(service, t + jitter, mins, scenario, mv))
         t += resolution_sec
 
-    conn = sqlite3.connect(db_path)
-    try:
+    with sqlite3.connect(db_path) as conn:
         conn.executemany(
             "INSERT INTO metrics (timestamp, name, value, service, labels) VALUES (?,?,?,?,?)",
             metric_rows,
@@ -377,15 +372,12 @@ def backfill(db_path: str, minutes: int = 30, resolution_sec: int = 5) -> None:
             "INSERT INTO logs (timestamp, level, service, message) VALUES (?,?,?,?)",
             log_rows,
         )
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def stream(
     db_path: str,
     interval_sec: float = 1.0,
-    stop_event: Optional[threading.Event] = None,
+    stop_event: threading.Event | None = None,
 ) -> None:
     """Generate live data points until `stop_event` is set (or forever)."""
     demo_epoch, scenario = _ensure_scenario()
@@ -406,8 +398,7 @@ def stream(
             if random.random() < 0.6:
                 log_rows.append(_gen_log(service, now, mins, scenario, mv))
 
-        conn = sqlite3.connect(db_path)
-        try:
+        with sqlite3.connect(db_path) as conn:
             conn.executemany(
                 "INSERT INTO metrics (timestamp, name, value, service, labels) VALUES (?,?,?,?,?)",
                 metric_rows,
@@ -417,8 +408,5 @@ def stream(
                     "INSERT INTO logs (timestamp, level, service, message) VALUES (?,?,?,?)",
                     log_rows,
                 )
-            conn.commit()
-        finally:
-            conn.close()
 
         time.sleep(interval_sec)

@@ -149,16 +149,15 @@ class ObservabilityTUI(App):
 
     def _read_state(self) -> dict[str, Any] | None:
         try:
-            conn = sqlite3.connect(self._db_path)
-            row = conn.execute(
-                "SELECT panels, timeseries_metric, timeseries_service,"
-                "       histogram_metric, histogram_service,"
-                "       log_level, log_keyword, log_service,"
-                "       time_range_minutes,"
-                "       agent_status, agent_last_action, updated_at"
-                " FROM dashboard_state WHERE id = 1"
-            ).fetchone()
-            conn.close()
+            with sqlite3.connect(self._db_path) as conn:
+                row = conn.execute(
+                    "SELECT panels, timeseries_metric, timeseries_service,"
+                    "       histogram_metric, histogram_service,"
+                    "       log_level, log_keyword, log_service,"
+                    "       time_range_minutes,"
+                    "       agent_status, agent_last_action, updated_at"
+                    " FROM dashboard_state WHERE id = 1"
+                ).fetchone()
         except Exception:
             return None
         if not row:
@@ -248,15 +247,14 @@ class ObservabilityTUI(App):
     def _poll_overview(self, state: dict[str, Any]) -> None:
         cutoff = time.time() - state["minutes"] * 60
         try:
-            conn = sqlite3.connect(self._db_path)
-            rows = conn.execute(
-                "SELECT service, name, AVG(value) FROM metrics"
-                " WHERE name IN ('latency_p99', 'error_rate', 'req_per_sec')"
-                "   AND timestamp > ?"
-                " GROUP BY service, name",
-                (cutoff,),
-            ).fetchall()
-            conn.close()
+            with sqlite3.connect(self._db_path) as conn:
+                rows = conn.execute(
+                    "SELECT service, name, AVG(value) FROM metrics"
+                    " WHERE name IN ('latency_p99', 'error_rate', 'req_per_sec')"
+                    "   AND timestamp > ?"
+                    " GROUP BY service, name",
+                    (cutoff,),
+                ).fetchall()
         except Exception:
             return
 
@@ -286,24 +284,23 @@ class ObservabilityTUI(App):
         bucket = max(5, minutes * 60 // 100)
 
         try:
-            conn = sqlite3.connect(self._db_path)
-            if svc_filter == "all":
-                rows = conn.execute(
-                    "SELECT ROUND(timestamp / ?) * ? AS ts, AVG(value), service"
-                    " FROM metrics"
-                    " WHERE name = ? AND timestamp > ?"
-                    " GROUP BY ts, service ORDER BY ts ASC",
-                    (bucket, bucket, metric, cutoff),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT ROUND(timestamp / ?) * ? AS ts, AVG(value), service"
-                    " FROM metrics"
-                    " WHERE name = ? AND service = ? AND timestamp > ?"
-                    " GROUP BY ts, service ORDER BY ts ASC",
-                    (bucket, bucket, metric, svc_filter, cutoff),
-                ).fetchall()
-            conn.close()
+            with sqlite3.connect(self._db_path) as conn:
+                if svc_filter == "all":
+                    rows = conn.execute(
+                        "SELECT ROUND(timestamp / ?) * ? AS ts, AVG(value), service"
+                        " FROM metrics"
+                        " WHERE name = ? AND timestamp > ?"
+                        " GROUP BY ts, service ORDER BY ts ASC",
+                        (bucket, bucket, metric, cutoff),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT ROUND(timestamp / ?) * ? AS ts, AVG(value), service"
+                        " FROM metrics"
+                        " WHERE name = ? AND service = ? AND timestamp > ?"
+                        " GROUP BY ts, service ORDER BY ts ASC",
+                        (bucket, bucket, metric, svc_filter, cutoff),
+                    ).fetchall()
         except Exception:
             return
 
@@ -338,19 +335,18 @@ class ObservabilityTUI(App):
         cutoff = time.time() - state["minutes"] * 60
 
         try:
-            conn = sqlite3.connect(self._db_path)
-            if svc_filter == "all":
-                rows = conn.execute(
-                    "SELECT value FROM metrics WHERE name = ? AND timestamp > ?",
-                    (metric, cutoff),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT value FROM metrics"
-                    " WHERE name = ? AND service = ? AND timestamp > ?",
-                    (metric, svc_filter, cutoff),
-                ).fetchall()
-            conn.close()
+            with sqlite3.connect(self._db_path) as conn:
+                if svc_filter == "all":
+                    rows = conn.execute(
+                        "SELECT value FROM metrics WHERE name = ? AND timestamp > ?",
+                        (metric, cutoff),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT value FROM metrics"
+                        " WHERE name = ? AND service = ? AND timestamp > ?",
+                        (metric, svc_filter, cutoff),
+                    ).fetchall()
         except Exception:
             return
 
@@ -398,13 +394,12 @@ class ObservabilityTUI(App):
         where = " AND ".join(conditions)
 
         try:
-            conn = sqlite3.connect(self._db_path)
-            rows = conn.execute(
-                f"SELECT id, timestamp, level, service, message FROM logs"
-                f" WHERE {where} ORDER BY id ASC LIMIT 200",
-                params,
-            ).fetchall()
-            conn.close()
+            with sqlite3.connect(self._db_path) as conn:
+                rows = conn.execute(
+                    f"SELECT id, timestamp, level, service, message FROM logs"
+                    f" WHERE {where} ORDER BY id ASC LIMIT 200",
+                    params,
+                ).fetchall()
         except Exception:
             return
 

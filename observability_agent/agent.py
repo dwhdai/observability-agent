@@ -1,7 +1,5 @@
 """SRE copilot agent — Pydantic AI chat loop (T08+)."""
 
-from __future__ import annotations
-
 import json
 import os
 import sqlite3
@@ -44,10 +42,9 @@ _ELABORATE_TRIGGERS = {
 def _get_available_data(db_path: str) -> tuple[list[str], list[str]]:
     """Query DB for distinct services and metrics."""
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        services = [r[0] for r in conn.execute("SELECT DISTINCT service FROM metrics ORDER BY service").fetchall()]
-        metrics = [r[0] for r in conn.execute("SELECT DISTINCT name FROM metrics ORDER BY name").fetchall()]
-        conn.close()
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            services = [r[0] for r in conn.execute("SELECT DISTINCT service FROM metrics ORDER BY service").fetchall()]
+            metrics = [r[0] for r in conn.execute("SELECT DISTINCT name FROM metrics ORDER BY name").fetchall()]
         return services or [], metrics or []
     except Exception:
         return [], []
@@ -59,6 +56,7 @@ def _get_available_data(db_path: str) -> tuple[list[str], list[str]]:
 def _build_system_prompt(services: list[str], metrics: list[str]) -> str:
     services_str = ", ".join(services) if services else "(none yet — DB may be empty)"
     metrics_str = ", ".join(metrics) if metrics else "(none yet — DB may be empty)"
+    elaborate_str = ", ".join(sorted(_ELABORATE_TRIGGERS))
 
     return f"""
 You are an SRE copilot for a microservices observability platform.
@@ -115,7 +113,7 @@ Default (no elaborate trigger): lead with a table or bullet list. Add 1–2 sent
 interpretation. No paragraphs. No preamble.
 
 Elaborate triggers — if the user message contains any of these words/phrases:
-  elaborate, explain, tell me more, detail, describe, walk me through, breakdown, deep dive
+  {elaborate_str}
 → expanded prose is allowed.
 
 ## How to behave
@@ -144,20 +142,13 @@ def _run_query(ctx: RunContext[Deps], sql: str) -> str:
     Row cap: 100 rows. Timeout: 2 seconds.
     """
     db_path = ctx.deps.db_path
-    conn: sqlite3.Connection | None = None
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
-
-        try:
-            conn.execute(f"EXPLAIN {sql}")
-        except sqlite3.OperationalError as exc:
-            return json.dumps({"success": False, "error": f"syntax error: {exc}"})
-
         result: dict = {}
 
         def _execute() -> None:
             try:
-                cur = conn.execute(sql)  # type: ignore[union-attr]
+                cur = conn.execute(sql)
                 result["rows"] = cur.fetchmany(100)
                 result["desc"] = cur.description
             except Exception as exc:
@@ -169,8 +160,10 @@ def _run_query(ctx: RunContext[Deps], sql: str) -> str:
         if t.is_alive():
             conn.interrupt()
             t.join()
+            conn.close()
             return json.dumps({"success": False, "error": "query timeout (2s)"})
 
+        conn.close()
         if "error" in result:
             return json.dumps({"success": False, "error": result["error"]})
 
@@ -179,9 +172,6 @@ def _run_query(ctx: RunContext[Deps], sql: str) -> str:
 
     except Exception as exc:
         return json.dumps({"success": False, "error": str(exc)})
-    finally:
-        if conn:
-            conn.close()
 
 
 def _update_dashboard(
@@ -210,61 +200,18 @@ def _update_dashboard(
     agent_status: short status string shown in TUI footer
     agent_last_action: description of last action shown in TUI footer
     """
-    db_path = ctx.deps.db_path
+    fields: dict = {k: v for k, v in locals().items() if k not in ("ctx",) and v is not None}
+    if "panels" in fields:
+        fields["panels"] = json.dumps(fields["panels"])
+    fields["updated_at"] = time.time()
+
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
     try:
-        conn = sqlite3.connect(db_path)
-        try:
-            row = conn.execute(
-                "SELECT panels, timeseries_metric, timeseries_service,"
-                "       histogram_metric, histogram_service,"
-                "       log_level, log_keyword, log_service,"
-                "       time_range_minutes, agent_status, agent_last_action"
-                " FROM dashboard_state WHERE id = 1"
-            ).fetchone()
-            if not row:
-                return json.dumps({"success": False, "error": "dashboard_state row missing"})
-
-            (
-                cur_panels, cur_ts_m, cur_ts_s,
-                cur_hist_m, cur_hist_s,
-                cur_log_lvl, cur_log_kw, cur_log_svc,
-                cur_range, cur_status, cur_action,
-            ) = row
-
-            merged_panels = json.dumps(panels) if panels is not None else cur_panels
+        with sqlite3.connect(ctx.deps.db_path) as conn:
             conn.execute(
-                """UPDATE dashboard_state SET
-                    panels              = ?,
-                    timeseries_metric   = ?,
-                    timeseries_service  = ?,
-                    histogram_metric    = ?,
-                    histogram_service   = ?,
-                    log_level           = ?,
-                    log_keyword         = ?,
-                    log_service         = ?,
-                    time_range_minutes  = ?,
-                    agent_status        = ?,
-                    agent_last_action   = ?,
-                    updated_at          = ?
-                WHERE id = 1""",
-                (
-                    merged_panels,
-                    timeseries_metric   if timeseries_metric   is not None else cur_ts_m,
-                    timeseries_service  if timeseries_service  is not None else cur_ts_s,
-                    histogram_metric    if histogram_metric     is not None else cur_hist_m,
-                    histogram_service   if histogram_service    is not None else cur_hist_s,
-                    log_level           if log_level            is not None else cur_log_lvl,
-                    log_keyword         if log_keyword          is not None else cur_log_kw,
-                    log_service         if log_service          is not None else cur_log_svc,
-                    time_range_minutes  if time_range_minutes   is not None else cur_range,
-                    agent_status        if agent_status         is not None else cur_status,
-                    agent_last_action   if agent_last_action    is not None else cur_action,
-                    time.time(),
-                ),
+                f"UPDATE dashboard_state SET {set_clause} WHERE id = 1",
+                list(fields.values()),
             )
-            conn.commit()
-        finally:
-            conn.close()
         return json.dumps({"success": True})
     except Exception as exc:
         return json.dumps({"success": False, "error": str(exc)})

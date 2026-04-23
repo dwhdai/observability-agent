@@ -1,6 +1,4 @@
 """Database initialisation and helpers."""
-from __future__ import annotations
-
 import sqlite3
 from pathlib import Path
 
@@ -15,8 +13,7 @@ def init_db(db_path: str | None = None) -> None:
     if db_path is None:
         db_path = get_db_path()
 
-    conn = sqlite3.connect(db_path)
-    try:
+    with sqlite3.connect(db_path) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
 
         conn.execute("""
@@ -63,9 +60,6 @@ def init_db(db_path: str | None = None) -> None:
             )
         """)
         conn.execute("INSERT OR IGNORE INTO dashboard_state (id) VALUES (1)")
-        conn.commit()
-    finally:
-        conn.close()
 
 
 _DEFAULT_STATE = {
@@ -87,8 +81,7 @@ def reset_dashboard_state(db_path: str | None = None) -> None:
     """Reset dashboard_state to defaults (call on TUI startup or user request)."""
     if db_path is None:
         db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
-    try:
+    with sqlite3.connect(db_path) as conn:
         conn.execute(
             """UPDATE dashboard_state SET
                 panels              = :panels,
@@ -105,6 +98,3 @@ def reset_dashboard_state(db_path: str | None = None) -> None:
             WHERE id = 1""",
             _DEFAULT_STATE,
         )
-        conn.commit()
-    finally:
-        conn.close()
