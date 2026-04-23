@@ -1,4 +1,5 @@
 """Synthetic metric + log generator with two anomaly scenarios."""
+
 from __future__ import annotations
 
 import random
@@ -13,18 +14,38 @@ METRICS = ["latency_p99", "error_rate", "req_per_sec", "cpu_usage"]
 
 # Healthy baseline values
 _BASE: dict[str, dict[str, float]] = {
-    "api-gateway":       {"latency_p99": 50.0,  "error_rate": 0.005, "req_per_sec": 500.0, "cpu_usage": 0.30},
-    "payment-service":   {"latency_p99": 150.0, "error_rate": 0.005, "req_per_sec": 200.0, "cpu_usage": 0.35},
-    "user-service":      {"latency_p99": 80.0,  "error_rate": 0.005, "req_per_sec": 300.0, "cpu_usage": 0.30},
-    "inventory-service": {"latency_p99": 60.0,  "error_rate": 0.005, "req_per_sec": 150.0, "cpu_usage": 0.25},
+    "api-gateway": {
+        "latency_p99": 50.0,
+        "error_rate": 0.005,
+        "req_per_sec": 500.0,
+        "cpu_usage": 0.30,
+    },
+    "payment-service": {
+        "latency_p99": 150.0,
+        "error_rate": 0.005,
+        "req_per_sec": 200.0,
+        "cpu_usage": 0.35,
+    },
+    "user-service": {
+        "latency_p99": 80.0,
+        "error_rate": 0.005,
+        "req_per_sec": 300.0,
+        "cpu_usage": 0.30,
+    },
+    "inventory-service": {
+        "latency_p99": 60.0,
+        "error_rate": 0.005,
+        "req_per_sec": 150.0,
+        "cpu_usage": 0.25,
+    },
 }
 
 # Gaussian noise as fraction of base value
 _NOISE: dict[str, float] = {
     "latency_p99": 0.06,
-    "error_rate":  0.15,
+    "error_rate": 0.15,
     "req_per_sec": 0.03,
-    "cpu_usage":   0.02,
+    "cpu_usage": 0.02,
 }
 
 # Log message templates per service / level
@@ -154,6 +175,7 @@ def _fmt(tmpl: str) -> str:
 
 # ── Scenario engine ─────────────────────────────────────────────────────────
 
+
 def _lerp(a: float, b: float, t: float) -> float:
     t = max(0.0, min(1.0, t))
     return a + (b - a) * t
@@ -178,30 +200,29 @@ def _compute_metric(service: str, metric: str, minutes: float, scenario: int) ->
                 base = _lerp(0.005, 0.03, (minutes - 21) / 5.0)
 
     # Scenario 2: Memory Leak — user-service slow-burn OOM, restart, resume
-    elif scenario == 2:
-        if service == "user-service":
-            # CPU climbs from minute 10
-            if metric == "cpu_usage":
-                if 10 <= minutes < 24:
-                    base = _lerp(0.30, 0.92, (minutes - 10) / 14.0)
-                elif 24 <= minutes < 26:   # restart — brief recovery
-                    base = _lerp(0.92, 0.32, (minutes - 24) / 2.0)
-                elif minutes >= 26:         # resumes climbing
-                    base = _lerp(0.32, 0.75, (minutes - 26) / 8.0)
-            elif metric == "latency_p99":
-                if 18 <= minutes < 24:
-                    base = _lerp(80.0, 320.0, (minutes - 18) / 6.0)
-                elif 24 <= minutes < 26:
-                    base = _lerp(320.0, 80.0, (minutes - 24) / 2.0)
-                elif minutes >= 26:
-                    base = _lerp(80.0, 260.0, (minutes - 26) / 6.0)
-            elif metric == "error_rate":
-                if 22 <= minutes < 24:
-                    base = _lerp(0.005, 0.15, (minutes - 22) / 2.0)
-                elif 24 <= minutes < 26:
-                    base = _lerp(0.15, 0.005, (minutes - 24) / 2.0)
-                elif minutes >= 26:
-                    base = _lerp(0.005, 0.12, (minutes - 26) / 6.0)
+    elif scenario == 2 and service == "user-service":
+        # CPU climbs from minute 10
+        if metric == "cpu_usage":
+            if 10 <= minutes < 24:
+                base = _lerp(0.30, 0.92, (minutes - 10) / 14.0)
+            elif 24 <= minutes < 26:  # restart — brief recovery
+                base = _lerp(0.92, 0.32, (minutes - 24) / 2.0)
+            elif minutes >= 26:  # resumes climbing
+                base = _lerp(0.32, 0.75, (minutes - 26) / 8.0)
+        elif metric == "latency_p99":
+            if 18 <= minutes < 24:
+                base = _lerp(80.0, 320.0, (minutes - 18) / 6.0)
+            elif 24 <= minutes < 26:
+                base = _lerp(320.0, 80.0, (minutes - 24) / 2.0)
+            elif minutes >= 26:
+                base = _lerp(80.0, 260.0, (minutes - 26) / 6.0)
+        elif metric == "error_rate":
+            if 22 <= minutes < 24:
+                base = _lerp(0.005, 0.15, (minutes - 22) / 2.0)
+            elif 24 <= minutes < 26:
+                base = _lerp(0.15, 0.005, (minutes - 24) / 2.0)
+            elif minutes >= 26:
+                base = _lerp(0.005, 0.12, (minutes - 26) / 6.0)
 
     value = base + noise
     if metric == "error_rate":
@@ -213,43 +234,57 @@ def _compute_metric(service: str, metric: str, minutes: float, scenario: int) ->
     return value
 
 
-def _anomaly_log(service: str, minutes: float, scenario: int) -> Optional[tuple[str, str]]:
+def _anomaly_log(
+    service: str, minutes: float, scenario: int
+) -> Optional[tuple[str, str]]:
     """Return (level, message) if an anomaly log should be injected, else None."""
     if scenario == 1:
         if service == "payment-service" and minutes >= 15 and random.random() < 0.35:
-            msg = random.choice([
-                "connection pool exhausted",
-                "DB connection refused: postgres:5432",
-                "Payment failed: timeout on DB write txn-{txn}",
-                "Saga rollback triggered: txn-{txn}",
-            ])
+            msg = random.choice(
+                [
+                    "connection pool exhausted",
+                    "DB connection refused: postgres:5432",
+                    "Payment failed: timeout on DB write txn-{txn}",
+                    "Saga rollback triggered: txn-{txn}",
+                ]
+            )
             return ("ERROR", _fmt(msg))
         if service == "api-gateway" and minutes >= 20 and random.random() < 0.35:
-            msg = random.choice([
-                "timeout waiting for payment-service",
-                "retry limit exceeded for payment-service",
-                "circuit breaker OPEN: payment-service",
-                "upstream connection refused: payment-service:8080",
-            ])
+            msg = random.choice(
+                [
+                    "timeout waiting for payment-service",
+                    "retry limit exceeded for payment-service",
+                    "circuit breaker OPEN: payment-service",
+                    "upstream connection refused: payment-service:8080",
+                ]
+            )
             return ("ERROR", _fmt(msg))
     elif scenario == 2:
         if service == "user-service":
             if 22 <= minutes < 26 and random.random() < 0.50:
-                msg = random.choice([
-                    "heap usage 89%",
-                    "GC pause 450ms (threshold 200ms)",
-                    "OOM killed: heap usage exceeded limit",
-                    "service restarted after OOM",
-                    "Out of memory: kill process user-service pid={pid}",
-                ])
-                level = "ERROR" if "OOM" in msg or "killed" in msg or "kill" in msg else "WARN"
+                msg = random.choice(
+                    [
+                        "heap usage 89%",
+                        "GC pause 450ms (threshold 200ms)",
+                        "OOM killed: heap usage exceeded limit",
+                        "service restarted after OOM",
+                        "Out of memory: kill process user-service pid={pid}",
+                    ]
+                )
+                level = (
+                    "ERROR"
+                    if "OOM" in msg or "killed" in msg or "kill" in msg
+                    else "WARN"
+                )
                 return (level, _fmt(msg))
             elif 18 <= minutes < 22 and random.random() < 0.35:
-                msg = random.choice([
-                    "heap usage {heap}%",
-                    "GC pause {pause}ms (threshold 200ms)",
-                    "Live object count: {n}k — possible leak",
-                ])
+                msg = random.choice(
+                    [
+                        "heap usage {heap}%",
+                        "GC pause {pause}ms (threshold 200ms)",
+                        "Live object count: {n}k — possible leak",
+                    ]
+                )
                 return ("WARN", _fmt(msg))
     return None
 
@@ -262,7 +297,9 @@ def _level_weights(error_rate: float) -> list[float]:
     return [0.20, 0.62, 0.16, 0.02]
 
 
-def _gen_log(service: str, ts: float, minutes: float, scenario: int, metric_vals: dict) -> tuple:
+def _gen_log(
+    service: str, ts: float, minutes: float, scenario: int, metric_vals: dict
+) -> tuple:
     """Return (timestamp, level, service, message)."""
     injected = _anomaly_log(service, minutes, scenario)
     if injected:
@@ -287,19 +324,25 @@ def _ensure_scenario(minutes: int = 30) -> tuple[float, int]:
     with _state_lock:
         if _demo_epoch is None:
             _demo_epoch = time.time() - minutes * 60
+        if _scenario is None:
             _scenario = random.randint(1, 2)
         return _demo_epoch, _scenario
 
 
-def reset_scenario() -> None:
-    """Force a new random scenario (call before backfill on fresh start)."""
+def reset_scenario(scenario: Optional[int] = None) -> None:
+    """Force a new scenario (call before backfill on fresh start).
+
+    Args:
+        scenario: 1 = Cascade Failure, 2 = Memory Leak, None = random.
+    """
     global _demo_epoch, _scenario
     with _state_lock:
         _demo_epoch = None
-        _scenario = None
+        _scenario = scenario
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
+
 
 def backfill(db_path: str, minutes: int = 30, resolution_sec: int = 5) -> None:
     """Insert historical data covering the last `minutes` minutes."""
@@ -339,7 +382,11 @@ def backfill(db_path: str, minutes: int = 30, resolution_sec: int = 5) -> None:
         conn.close()
 
 
-def stream(db_path: str, interval_sec: float = 1.0, stop_event: Optional[threading.Event] = None) -> None:
+def stream(
+    db_path: str,
+    interval_sec: float = 1.0,
+    stop_event: Optional[threading.Event] = None,
+) -> None:
     """Generate live data points until `stop_event` is set (or forever)."""
     demo_epoch, scenario = _ensure_scenario()
 

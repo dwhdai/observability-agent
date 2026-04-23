@@ -91,9 +91,10 @@ class ObservabilityTUI(App):
     }
     """
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, scenario: int | None = None) -> None:
         super().__init__()
         self._db_path = db_path
+        self._scenario = scenario
         self._last_log_id: int = 0
         self._stop_event = threading.Event()
         # Column keys set in _init_overview_table
@@ -135,9 +136,10 @@ class ObservabilityTUI(App):
     def _start_data_thread(self) -> None:
         db_path = self._db_path
         stop_event = self._stop_event
+        scenario = self._scenario
 
         def _run() -> None:
-            reset_scenario()
+            reset_scenario(scenario)
             backfill(db_path)
             stream(db_path, interval_sec=1.0, stop_event=stop_event)
 
@@ -421,6 +423,6 @@ class ObservabilityTUI(App):
         self._stop_event.set()
 
 
-def run_tui() -> None:
-    app = ObservabilityTUI(db_path=get_db_path())
+def run_tui(scenario: int | None = None) -> None:
+    app = ObservabilityTUI(db_path=get_db_path(), scenario=scenario)
     app.run()

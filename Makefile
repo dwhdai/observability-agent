@@ -1,10 +1,12 @@
 .PHONY: install tui agent focus-payment focus-errors focus-logs reset-state
 
+SCENARIO ?=
+
 install:
 	pip install -e .
 
 tui:
-	python -m observability_agent tui
+	python -m observability_agent tui $(if $(SCENARIO),--scenario $(SCENARIO),)
 
 agent:
 	python -m observability_agent agent

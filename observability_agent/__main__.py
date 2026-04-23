@@ -9,7 +9,13 @@ def main() -> None:
         description="SRE observability TUI + AI agent",
     )
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser("tui", help="Launch the TUI dashboard")
+    tui_parser = sub.add_parser("tui", help="Launch the TUI dashboard")
+    tui_parser.add_argument(
+        "--scenario",
+        type=int,
+        choices=[1, 2],
+        help="1=Cascade Failure, 2=Memory Leak (default: random)",
+    )
     sub.add_parser("agent", help="Launch the AI agent CLI")
     args = parser.parse_args()
 
@@ -17,7 +23,7 @@ def main() -> None:
         from observability_agent.db import get_db_path, init_db
         init_db()
         from observability_agent.tui import run_tui
-        run_tui()
+        run_tui(scenario=args.scenario)
     elif args.command == "agent":
         from observability_agent.db import get_db_path, init_db
         init_db()
