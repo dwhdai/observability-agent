@@ -66,3 +66,45 @@ def init_db(db_path: str | None = None) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+_DEFAULT_STATE = {
+    "panels": '["overview","timeseries","histogram","logs"]',
+    "timeseries_metric": "latency_p99",
+    "timeseries_service": "all",
+    "histogram_metric": "latency_p99",
+    "histogram_service": "all",
+    "log_level": "all",
+    "log_keyword": "",
+    "log_service": "all",
+    "time_range_minutes": 30,
+    "agent_status": "idle",
+    "agent_last_action": "",
+}
+
+
+def reset_dashboard_state(db_path: str | None = None) -> None:
+    """Reset dashboard_state to defaults (call on TUI startup or user request)."""
+    if db_path is None:
+        db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """UPDATE dashboard_state SET
+                panels              = :panels,
+                timeseries_metric   = :timeseries_metric,
+                timeseries_service  = :timeseries_service,
+                histogram_metric    = :histogram_metric,
+                histogram_service   = :histogram_service,
+                log_level           = :log_level,
+                log_keyword         = :log_keyword,
+                log_service         = :log_service,
+                time_range_minutes  = :time_range_minutes,
+                agent_status        = :agent_status,
+                agent_last_action   = :agent_last_action
+            WHERE id = 1""",
+            _DEFAULT_STATE,
+        )
+        conn.commit()
+    finally:
+        conn.close()

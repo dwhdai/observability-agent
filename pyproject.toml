@@ -9,6 +9,7 @@ dependencies = [
     "textual-plotext>=0.2.0",
     "plotext>=5.2.0",
     "openai>=1.0.0",
+    "pydantic-ai>=0.2.0",
     "watchfiles>=0.20.0",
 ]
 

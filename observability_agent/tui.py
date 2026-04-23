@@ -1,18 +1,20 @@
-"""Textual TUI — 4-panel observability dashboard (T04/T05/T06)."""
+"""Textual TUI — 4-panel observability dashboard (T04/T05/T06/T07)."""
 
+import json
 import sqlite3
 import threading
 import time
 from collections import defaultdict
 from datetime import datetime
+from typing import Any
 
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
-from textual.widgets import DataTable, Footer, Header, RadioButton, RadioSet, RichLog
+from textual.widgets import DataTable, Footer, Header, RichLog, Static
 from textual_plotext import PlotextPlot
 
-from observability_agent.db import get_db_path
+from observability_agent.db import get_db_path, reset_dashboard_state
 from observability_agent.synthetic import SERVICES, backfill, reset_scenario, stream
 
 _LEVEL_STYLE: dict[str, str] = {
@@ -22,8 +24,6 @@ _LEVEL_STYLE: dict[str, str] = {
     "ERROR": "bold red",
 }
 
-_WINDOW_OPTIONS: list[int] = [5, 10, 15, 30]  # minutes
-
 # Stable colour order so each service always gets the same plotext colour
 _SERVICE_ORDER = list(SERVICES)
 
@@ -32,6 +32,8 @@ _THRESHOLDS: dict[str, tuple[float, float]] = {
     "latency_p99": (100.0, 300.0),  # ms
     "error_rate":  (0.01,  0.05),   # fraction
 }
+
+_ALL_PANELS = {"overview", "timeseries", "histogram", "logs"}
 
 
 def _health_style(metric: str, value: float) -> str:
@@ -48,7 +50,7 @@ def _health_style(metric: str, value: float) -> str:
 
 class ObservabilityTUI(App):
     TITLE = "Observability Dashboard"
-    BINDINGS = [("q", "quit", "Quit")]
+    BINDINGS = [("q", "quit", "Quit"), ("r", "reset", "Reset view")]
 
     CSS = """
     Screen {
@@ -75,16 +77,17 @@ class ObservabilityTUI(App):
         border: solid $accent;
     }
 
-    #time-selector {
-        height: auto;
-        padding: 0 1;
-        background: $surface;
-    }
-
     #log-viewer {
         height: 1fr;
         border: solid $accent;
         scrollbar-gutter: stable;
+    }
+
+    #agent-status {
+        height: 1;
+        background: $surface;
+        color: $text-muted;
+        padding: 0 1;
     }
     """
 
@@ -92,12 +95,13 @@ class ObservabilityTUI(App):
         super().__init__()
         self._db_path = db_path
         self._last_log_id: int = 0
-        self._chart_minutes: int = _WINDOW_OPTIONS[0]
         self._stop_event = threading.Event()
-        # Set in _init_overview_table
+        # Column keys set in _init_overview_table
         self._col_lat: object = None
         self._col_err: object = None
         self._col_rps: object = None
+        # Cached log filter — detect changes to clear+refetch
+        self._log_filter: tuple[str, str, str] = ("", "", "")
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -107,20 +111,18 @@ class ObservabilityTUI(App):
             PlotextPlot(id="histogram"),
             id="charts-row",
         )
-        yield RadioSet(
-            *[
-                RadioButton(f"{m}m", value=(m == _WINDOW_OPTIONS[0]))
-                for m in _WINDOW_OPTIONS
-            ],
-            id="time-selector",
-        )
         yield RichLog(highlight=False, markup=False, wrap=True, id="log-viewer")
+        yield Static("Agent: idle", id="agent-status")
         yield Footer()
 
     def on_mount(self) -> None:
+        reset_dashboard_state(self._db_path)
         self._init_overview_table()
         self._start_data_thread()
         self.set_interval(0.5, self._poll)
+
+    def action_reset(self) -> None:
+        reset_dashboard_state(self._db_path)
 
     def _init_overview_table(self) -> None:
         table = self.query_one("#overview", DataTable)
@@ -129,9 +131,6 @@ class ObservabilityTUI(App):
         )
         for svc in _SERVICE_ORDER:
             table.add_row(svc, "—", "—", "—", key=svc)
-
-    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
-        self._chart_minutes = _WINDOW_OPTIONS[event.index]
 
     def _start_data_thread(self) -> None:
         db_path = self._db_path
@@ -144,20 +143,110 @@ class ObservabilityTUI(App):
 
         threading.Thread(target=_run, daemon=True).start()
 
+    # ── State ────────────────────────────────────────────────────────────────
+
+    def _read_state(self) -> dict[str, Any] | None:
+        try:
+            conn = sqlite3.connect(self._db_path)
+            row = conn.execute(
+                "SELECT panels, timeseries_metric, timeseries_service,"
+                "       histogram_metric, histogram_service,"
+                "       log_level, log_keyword, log_service,"
+                "       time_range_minutes,"
+                "       agent_status, agent_last_action, updated_at"
+                " FROM dashboard_state WHERE id = 1"
+            ).fetchone()
+            conn.close()
+        except Exception:
+            return None
+        if not row:
+            return None
+        (
+            panels_json,
+            ts_metric, ts_service,
+            hist_metric, hist_service,
+            log_level, log_keyword, log_service,
+            time_range,
+            agent_status, agent_last_action, updated_at,
+        ) = row
+        try:
+            panels: set[str] = set(json.loads(panels_json))
+        except Exception:
+            panels = set(_ALL_PANELS)
+        return {
+            "panels": panels,
+            "ts_metric": ts_metric,
+            "ts_service": ts_service,
+            "hist_metric": hist_metric,
+            "hist_service": hist_service,
+            "log_level": log_level or "all",
+            "log_keyword": log_keyword or "",
+            "log_service": log_service or "all",
+            "minutes": int(time_range) if time_range else 30,
+            "agent_status": agent_status or "idle",
+            "agent_last_action": agent_last_action or "",
+            "updated_at": updated_at or 0.0,
+        }
+
     # ── Poll ────────────────────────────────────────────────────────────────
 
     def _poll(self) -> None:
-        self._poll_overview()
-        self._poll_chart()
-        self._poll_histogram()
-        self._poll_logs()
+        state = self._read_state()
+        if state is None:
+            return
+        panels = state["panels"]
+        self._apply_panel_visibility(panels)
+        if "overview" in panels:
+            self._poll_overview(state)
+        if "timeseries" in panels:
+            self._poll_chart(state)
+        if "histogram" in panels:
+            self._poll_histogram(state)
+        if "logs" in panels:
+            self._poll_logs(state)
+        self._poll_agent_status(state)
+
+    def _poll_agent_status(self, state: dict[str, Any]) -> None:
+        status = state["agent_status"]
+        last_action = state["agent_last_action"]
+        updated_at = state["updated_at"]
+
+        if updated_at:
+            age = time.time() - updated_at
+            if age < 60:
+                age_str = f"{int(age)}s ago"
+            else:
+                age_str = f"{int(age / 60)}m ago"
+            time_part = f"  [{age_str}]"
+        else:
+            time_part = ""
+
+        parts = [f"Agent: {status}"]
+        if last_action:
+            parts.append(f"— {last_action}")
+        parts.append(time_part)
+
+        self.query_one("#agent-status", Static).update("  ".join(p for p in parts if p))
+
+    # ── Panel visibility ─────────────────────────────────────────────────────
+
+    def _apply_panel_visibility(self, panels: set[str]) -> None:
+        self.query_one("#overview").display = "overview" in panels
+
+        show_chart = "timeseries" in panels
+        show_hist = "histogram" in panels
+        self.query_one("#chart").display = show_chart
+        self.query_one("#histogram").display = show_hist
+        self.query_one("#charts-row").display = show_chart or show_hist
+
+        self.query_one("#log-viewer").display = "logs" in panels
 
     # ── Overview ─────────────────────────────────────────────────────────────
 
-    def _poll_overview(self) -> None:
+    def _poll_overview(self, state: dict[str, Any]) -> None:
+        cutoff = time.time() - state["minutes"] * 60
         try:
             conn = sqlite3.connect(self._db_path)
-            cutoff = time.time() - self._chart_minutes * 60
             rows = conn.execute(
                 "SELECT service, name, AVG(value) FROM metrics"
                 " WHERE name IN ('latency_p99', 'error_rate', 'req_per_sec')"
@@ -187,22 +276,15 @@ class ObservabilityTUI(App):
 
     # ── Time-series chart ────────────────────────────────────────────────────
 
-    def _poll_chart(self) -> None:
+    def _poll_chart(self, state: dict[str, Any]) -> None:
+        metric = state["ts_metric"]
+        svc_filter = state["ts_service"]
+        minutes = state["minutes"]
+        cutoff = time.time() - minutes * 60
+        bucket = max(5, minutes * 60 // 100)
+
         try:
             conn = sqlite3.connect(self._db_path)
-            state = conn.execute(
-                "SELECT timeseries_metric, timeseries_service"
-                " FROM dashboard_state WHERE id = 1"
-            ).fetchone()
-            if not state:
-                conn.close()
-                return
-            metric, svc_filter = state
-            cutoff = time.time() - self._chart_minutes * 60
-
-            # Downsample to ~100 points across the window to avoid block-fill rendering
-            bucket = max(5, self._chart_minutes * 60 // 100)
-
             if svc_filter == "all":
                 rows = conn.execute(
                     "SELECT ROUND(timestamp / ?) * ? AS ts, AVG(value), service"
@@ -226,10 +308,7 @@ class ObservabilityTUI(App):
         if not rows:
             return
 
-        # Group into per-service series; x = elapsed minutes from window start
-        series: dict[str, tuple[list[float], list[float]]] = defaultdict(
-            lambda: ([], [])
-        )
+        series: dict[str, tuple[list[float], list[float]]] = defaultdict(lambda: ([], []))
         for ts, val, svc in rows:
             xs, ys = series[svc]
             xs.append((ts - cutoff) / 60.0)
@@ -238,7 +317,7 @@ class ObservabilityTUI(App):
         chart = self.query_one("#chart", PlotextPlot)
         plt = chart.plt
         plt.clear_figure()
-        plt.title(f"{metric}  [{svc_filter}]  last {self._chart_minutes}m")
+        plt.title(f"{metric}  [{svc_filter}]  last {minutes}m")
         plt.xlabel("minutes")
 
         for svc in _SERVICE_ORDER:
@@ -251,19 +330,13 @@ class ObservabilityTUI(App):
 
     # ── Histogram ────────────────────────────────────────────────────────────
 
-    def _poll_histogram(self) -> None:
+    def _poll_histogram(self, state: dict[str, Any]) -> None:
+        metric = state["hist_metric"]
+        svc_filter = state["hist_service"]
+        cutoff = time.time() - state["minutes"] * 60
+
         try:
             conn = sqlite3.connect(self._db_path)
-            state = conn.execute(
-                "SELECT histogram_metric, histogram_service"
-                " FROM dashboard_state WHERE id = 1"
-            ).fetchone()
-            if not state:
-                conn.close()
-                return
-            metric, svc_filter = state
-            cutoff = time.time() - self._chart_minutes * 60
-
             if svc_filter == "all":
                 rows = conn.execute(
                     "SELECT value FROM metrics WHERE name = ? AND timestamp > ?",
@@ -294,13 +367,40 @@ class ObservabilityTUI(App):
 
     # ── Logs ────────────────────────────────────────────────────────────────
 
-    def _poll_logs(self) -> None:
+    def _poll_logs(self, state: dict[str, Any]) -> None:
+        log_level = state["log_level"]
+        log_keyword = state["log_keyword"]
+        log_service = state["log_service"]
+        new_filter = (log_level, log_keyword, log_service)
+
+        log_widget = self.query_one("#log-viewer", RichLog)
+
+        if new_filter != self._log_filter:
+            log_widget.clear()
+            self._last_log_id = 0
+            self._log_filter = new_filter
+
+        conditions = ["id > ?"]
+        params: list[Any] = [self._last_log_id]
+
+        if log_level != "all":
+            conditions.append("level = ?")
+            params.append(log_level)
+        if log_service != "all":
+            conditions.append("service = ?")
+            params.append(log_service)
+        if log_keyword:
+            conditions.append("message LIKE ?")
+            params.append(f"%{log_keyword}%")
+
+        where = " AND ".join(conditions)
+
         try:
             conn = sqlite3.connect(self._db_path)
             rows = conn.execute(
-                "SELECT id, timestamp, level, service, message FROM logs"
-                " WHERE id > ? ORDER BY id ASC LIMIT 200",
-                (self._last_log_id,),
+                f"SELECT id, timestamp, level, service, message FROM logs"
+                f" WHERE {where} ORDER BY id ASC LIMIT 200",
+                params,
             ).fetchall()
             conn.close()
         except Exception:
@@ -309,7 +409,6 @@ class ObservabilityTUI(App):
         if not rows:
             return
 
-        log_widget = self.query_one("#log-viewer", RichLog)
         for row_id, ts, level, service, message in rows:
             style = _LEVEL_STYLE.get(level, "")
             dt = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
