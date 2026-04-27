@@ -19,8 +19,8 @@ def main() -> None:
     tui_parser.add_argument(
         "--scenario",
         type=int,
-        choices=[1, 2],
-        help="1=Cascade Failure, 2=Memory Leak (default: random)",
+        choices=[1, 2, 3],
+        help="1=Cascade Failure, 2=Memory Leak, 3=LLM Rate Limit (default: random)",
     )
     sub.add_parser("agent", help="Launch the AI agent CLI")
     args = parser.parse_args()

@@ -110,6 +110,9 @@ class ObservabilityTUI(App):
 
         def _run() -> None:
             reset_scenario(scenario)
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("DELETE FROM metrics")
+                conn.execute("DELETE FROM logs")
             backfill(db_path)
             stream(db_path, interval_sec=1.0, stop_event=stop_event)
 

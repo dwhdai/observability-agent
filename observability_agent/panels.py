@@ -161,8 +161,6 @@ class OverviewPanel(Panel):
         _, self._col_lat, self._col_err, self._col_rps = self._table.add_columns(
             "Service", "P99 Latency (ms)", "Error Rate", "Req/s"
         )
-        for svc in _SERVICE_ORDER:
-            self._table.add_row(svc, "—", "—", "—", key=svc)
 
     def poll(self, state: DashboardState) -> None:
         assert self._table is not None
@@ -184,6 +182,7 @@ class OverviewPanel(Panel):
         for svc, name, val in rows:
             data[svc][name] = val
 
+        existing = {k.value for k in self._table.rows}
         for svc in _SERVICE_ORDER:
             if svc not in data:
                 continue
@@ -191,6 +190,8 @@ class OverviewPanel(Panel):
             lat = d.get("latency_p99", 0.0)
             err = d.get("error_rate", 0.0)
             rps = d.get("req_per_sec", 0.0)
+            if svc not in existing:
+                self._table.add_row(svc, "—", "—", "—", key=svc)
             self._table.update_cell(
                 svc,
                 self._col_lat,
