@@ -1,14 +1,16 @@
 import json
+import logging
 import sqlite3
 import threading
 import time
+from typing import cast
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Footer, Header, Static
 
 from observability_agent.db import get_db_path, reset_dashboard_state
-from observability_agent.models import DashboardState
+from observability_agent.models import DashboardState, TimeRange
 from observability_agent.panels import ALL_PANELS, PANELS, Panel
 from observability_agent.synthetic import backfill, reset_scenario, stream
 
@@ -112,6 +114,9 @@ class ObservabilityTUI(App):
                     " FROM dashboard_state WHERE id = 1"
                 ).fetchone()
         except Exception:
+            logging.warning(
+                "Failed to read dashboard_state from %s", self._db_path, exc_info=True
+            )
             return None
         if not row:
             return None
@@ -130,6 +135,9 @@ class ObservabilityTUI(App):
         try:
             panels = json.loads(panels_json)
         except Exception:
+            logging.warning(
+                "Failed to parse panels JSON: %r", panels_json, exc_info=True
+            )
             panels = list(ALL_PANELS)
         try:
             return DashboardState(
@@ -139,12 +147,15 @@ class ObservabilityTUI(App):
                 log_level=log_level or "all",
                 log_keyword=log_keyword or "",
                 log_service=log_service or "all",
-                time_range_minutes=int(time_range_minutes) if time_range_minutes else 30,
+                time_range_minutes=cast(TimeRange, int(time_range_minutes) if time_range_minutes else 30),
                 agent_status=agent_status or "idle",
                 agent_last_action=agent_last_action or "",
                 updated_at=updated_at or 0.0,
             )
         except Exception:
+            logging.warning(
+                "Failed to construct DashboardState, using defaults", exc_info=True
+            )
             return DashboardState()
 
     def _poll(self) -> None:

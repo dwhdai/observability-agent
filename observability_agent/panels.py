@@ -16,12 +16,13 @@ import sqlite3
 import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import DataTable, RichLog
+from textual.widgets.data_table import ColumnKey
 from textual_plotext import PlotextPlot
 
 from observability_agent.models import DashboardState
@@ -42,7 +43,7 @@ _SERVICE_ORDER = list(SERVICES)
 # Health thresholds: (warn, crit)
 _THRESHOLDS: dict[str, tuple[float, float]] = {
     "latency_p99": (100.0, 300.0),  # ms
-    "error_rate":  (0.01,  0.05),   # fraction
+    "error_rate": (0.01, 0.05),  # fraction
 }
 
 ALL_PANELS: frozenset[str] = frozenset({"overview", "timeseries", "histogram", "logs"})
@@ -112,8 +113,26 @@ class Panel(ABC):
             with sqlite3.connect(self._db_path) as conn:
                 return conn.execute(sql, params).fetchall()
         except Exception:
-            logging.warning("DB query failed: %s | params=%s", sql, params, exc_info=True)
+            logging.warning(
+                "DB query failed: %s | params=%s", sql, params, exc_info=True
+            )
             return None
+
+    def _query_metrics(
+        self, name: str, service: str, cutoff: float
+    ) -> list[tuple] | None:
+        """Query raw metric rows ``(timestamp, value, service)``, handling service='all'."""
+        if service == "all":
+            return self._query_db(
+                "SELECT timestamp, value, service FROM metrics"
+                " WHERE name = ? AND timestamp > ?",
+                (name, cutoff),
+            )
+        return self._query_db(
+            "SELECT timestamp, value, service FROM metrics"
+            " WHERE name = ? AND service = ? AND timestamp > ?",
+            (name, service, cutoff),
+        )
 
 
 # ── Concrete panels ───────────────────────────────────────────────────────────
@@ -125,9 +144,9 @@ class OverviewPanel(Panel):
     def __init__(self, db_path: str) -> None:
         super().__init__(db_path)
         self._table: DataTable | None = None
-        self._col_lat: object = None
-        self._col_err: object = None
-        self._col_rps: object = None
+        self._col_lat: ColumnKey | None = None
+        self._col_err: ColumnKey | None = None
+        self._col_rps: ColumnKey | None = None
 
     @property
     def panel_id(self) -> str:
@@ -147,6 +166,9 @@ class OverviewPanel(Panel):
 
     def poll(self, state: DashboardState) -> None:
         assert self._table is not None
+        assert self._col_lat is not None
+        assert self._col_err is not None
+        assert self._col_rps is not None
         cutoff = time.time() - state.time_range_minutes * 60
         rows = self._query_db(
             "SELECT service, name, AVG(value) FROM metrics"
@@ -169,8 +191,16 @@ class OverviewPanel(Panel):
             lat = d.get("latency_p99", 0.0)
             err = d.get("error_rate", 0.0)
             rps = d.get("req_per_sec", 0.0)
-            self._table.update_cell(svc, self._col_lat, Text(f"{lat:.1f}", style=_health_style("latency_p99", lat)))
-            self._table.update_cell(svc, self._col_err, Text(f"{err*100:.2f}%", style=_health_style("error_rate", err)))
+            self._table.update_cell(
+                svc,
+                self._col_lat,
+                Text(f"{lat:.1f}", style=_health_style("latency_p99", lat)),
+            )
+            self._table.update_cell(
+                svc,
+                self._col_err,
+                Text(f"{err * 100:.2f}%", style=_health_style("error_rate", err)),
+            )
             self._table.update_cell(svc, self._col_rps, Text(f"{rps:.1f}"))
 
 
@@ -199,27 +229,12 @@ class TimeSeriesPanel(Panel):
         cutoff = time.time() - minutes * 60
         bucket = max(5, minutes * 60 // 100)
 
-        if svc_filter == "all":
-            rows = self._query_db(
-                "SELECT ROUND(timestamp / ?) * ? AS ts, AVG(value), service"
-                " FROM metrics"
-                " WHERE name = ? AND timestamp > ?"
-                " GROUP BY ts, service ORDER BY ts ASC",
-                (bucket, bucket, metric, cutoff),
-            )
-        else:
-            rows = self._query_db(
-                "SELECT ROUND(timestamp / ?) * ? AS ts, AVG(value), service"
-                " FROM metrics"
-                " WHERE name = ? AND service = ? AND timestamp > ?"
-                " GROUP BY ts, service ORDER BY ts ASC",
-                (bucket, bucket, metric, svc_filter, cutoff),
-            )
+        raw = self._query_metrics(metric, svc_filter, cutoff)
 
         plt = self._plot.plt
         plt.clear_figure()
 
-        if rows is None:
+        if raw is None:
             plt.title(f"{metric}  [{svc_filter}]  last {minutes}m  [query error]")
             self._plot.refresh()
             return
@@ -227,15 +242,23 @@ class TimeSeriesPanel(Panel):
         plt.title(f"{metric}  [{svc_filter}]  last {minutes}m")
         plt.xlabel("minutes")
 
-        if not rows:
+        if not raw:
             self._plot.refresh()
             return
 
-        series: dict[str, tuple[list[float], list[float]]] = defaultdict(lambda: ([], []))
-        for ts, val, svc in rows:
+        # Bucket aggregation in Python
+        buckets: dict[tuple[str, float], list[float]] = defaultdict(list)
+        for ts, val, svc in raw:
+            bk = round(ts / bucket) * bucket
+            buckets[(svc, bk)].append(val)
+
+        series: dict[str, tuple[list[float], list[float]]] = defaultdict(
+            lambda: ([], [])
+        )
+        for (svc, bk), vals in sorted(buckets.items(), key=lambda x: x[0][1]):
             xs, ys = series[svc]
-            xs.append((ts - cutoff) / 60.0)
-            ys.append(val)
+            xs.append((bk - cutoff) / 60.0)
+            ys.append(sum(vals) / len(vals))
 
         for svc in _SERVICE_ORDER:
             if svc not in series:
@@ -269,32 +292,23 @@ class HistogramPanel(Panel):
         svc_filter = state.timeseries_service
         cutoff = time.time() - state.time_range_minutes * 60
 
-        if svc_filter == "all":
-            rows = self._query_db(
-                "SELECT value FROM metrics WHERE name = ? AND timestamp > ?",
-                (metric, cutoff),
-            )
-        else:
-            rows = self._query_db(
-                "SELECT value FROM metrics WHERE name = ? AND service = ? AND timestamp > ?",
-                (metric, svc_filter, cutoff),
-            )
+        raw = self._query_metrics(metric, svc_filter, cutoff)
 
         plt = self._plot.plt
         plt.clear_figure()
 
-        if rows is None:
+        if raw is None:
             plt.title(f"{metric} distribution  [{svc_filter}]  [query error]")
             self._plot.refresh()
             return
 
         plt.title(f"{metric} distribution  [{svc_filter}]")
 
-        if not rows:
+        if not raw:
             self._plot.refresh()
             return
 
-        plt.hist([r[0] for r in rows], bins=10)
+        plt.hist([r[1] for r in raw], bins=10)
         plt.xlabel(metric)
         self._plot.refresh()
 
@@ -313,7 +327,9 @@ class LogPanel(Panel):
         return "logs"
 
     def make_widget(self) -> Widget:
-        self._log_widget = RichLog(highlight=False, markup=False, wrap=True, id=self.panel_id)
+        self._log_widget = RichLog(
+            highlight=False, markup=False, wrap=True, id=self.panel_id
+        )
         return self._log_widget
 
     def poll(self, state: DashboardState) -> None:
@@ -352,7 +368,7 @@ class LogPanel(Panel):
 
         for row_id, ts, level, service, message in rows:
             style = _LEVEL_STYLE.get(level, "")
-            dt = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+            dt = datetime.fromtimestamp(ts, tz=UTC).strftime("%H:%M:%S")
             line = Text()
             line.append(f"{dt} │ {level:<5} │ {service:<20} │ {message}", style=style)
             self._log_widget.write(line)
