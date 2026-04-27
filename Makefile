@@ -3,13 +3,13 @@
 SCENARIO ?=
 
 install:
-	pip install -e .
+	uv sync
 
 tui:
-	python -m observability_agent.app tui $(if $(SCENARIO),--scenario $(SCENARIO),)
+	uv run python -m observability_agent.app tui $(if $(SCENARIO),--scenario $(SCENARIO),)
 
 agent:
-	python -m observability_agent.app agent
+	uv run python -m observability_agent.app agent
 
 # ── Dashboard state test helpers (run while TUI is open) ────────────────────
 
