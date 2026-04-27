@@ -1,12 +1,12 @@
 """SRE copilot agent — Pydantic AI chat loop (T08+)."""
 
 import json
+import logging
 import os
 import sqlite3
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 from pydantic_ai import Agent, RunContext, UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
@@ -212,21 +212,7 @@ def _update_dashboard(
         return json.dumps({"success": False, "error": str(exc)})
 
 
-# ── Audit logging ─────────────────────────────────────────────────────────────
-
-
-def _audit_log(db_path: str, query: str, result: AgentResponse) -> None:
-    log_path = Path(db_path).parent / "agent_audit.jsonl"
-    entry = {
-        "timestamp": time.time(),
-        "model": _MODEL,
-        "query": query,
-        "accepted": result.accepted,
-        "rejection_reason": result.rejection_reason,
-        "response": result.response,
-    }
-    with open(log_path, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+_trace_logger = logging.getLogger("observability_agent.trace")
 
 
 # ── Chat loop ─────────────────────────────────────────────────────────────────
@@ -271,7 +257,15 @@ def run_agent() -> None:
                 usage_limits=_USAGE_LIMITS,
             )
             output: AgentResponse = result.output
-            _audit_log(db_path, user_input, output)
+            _trace_logger.info(json.dumps({
+                "timestamp": time.time(),
+                "model": _MODEL,
+                "query": user_input,
+                "accepted": output.accepted,
+                "rejection_reason": output.rejection_reason,
+                "response": output.response,
+                "messages": json.loads(result.all_messages_json()),
+            }))
             print(output.response)
             history = result.all_messages()
         except UsageLimitExceeded:

@@ -1,6 +1,12 @@
 """CLI entry point — `python -m observability_agent [tui|agent]`."""
+
 import argparse
 import sys
+
+from observability_agent.agent import run_agent
+from observability_agent.db import init_db
+from observability_agent.logging import configure_logging
+from observability_agent.tui import run_tui
 
 
 def main() -> None:
@@ -20,14 +26,11 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "tui":
-        from observability_agent.db import init_db
         init_db()
-        from observability_agent.tui import run_tui
         run_tui(scenario=args.scenario)
     elif args.command == "agent":
-        from observability_agent.db import init_db
         init_db()
-        from observability_agent.agent import run_agent
+        configure_logging()
         run_agent()
     else:
         parser.print_help()
