@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -124,6 +126,17 @@ Elaborate triggers — if the user message contains any of these words/phrases:
 - Keep SQL simple — the DB holds ~30 minutes of data at 5-second resolution.
 - Prefer `WHERE timestamp > (unixepoch() - N)` for time filters.
 - For accepted responses, set `accepted=true` and `rejection_reason=null`.
+
+## Data summarization (`run_analysis` tool)
+
+When a query returns many rows, use `run_analysis` instead of passing raw rows to your reasoning.
+Pass the query result dict directly as `data`, then write a short Python script that:
+- Reads `import json, sys; d = json.load(sys.stdin)` to get columns + rows
+- Computes distribution metrics: averages, min/max, percentiles, rolling averages, rate of change, counts, etc.
+- Prints a single JSON object to stdout summarizing the data
+
+Allowed stdlib only: json, math, statistics, collections, itertools, functools, operator, decimal, fractions.
+No file I/O, no network, no subprocess. Script must print valid JSON to stdout.
 """.strip()
 
 
@@ -173,6 +186,73 @@ def _run_query(ctx: RunContext[Deps], sql: str) -> str:
 
     except Exception as exc:
         return json.dumps({"success": False, "error": str(exc)})
+
+
+_ALLOWED_IMPORTS = frozenset({
+    "json", "math", "statistics", "collections", "itertools",
+    "functools", "operator", "decimal", "fractions",
+})
+
+_BLOCKED_PATTERNS = [
+    "import os", "import sys", "import subprocess", "import socket",
+    "import urllib", "import http", "import requests", "import pathlib",
+    "import shutil", "import glob", "open(", "__import__", "exec(",
+    "eval(", "compile(", "__builtins__", "importlib",
+]
+
+
+def _validate_script(script: str) -> str | None:
+    """Return error string if script is unsafe, else None."""
+    lowered = script.lower()
+    for pattern in _BLOCKED_PATTERNS:
+        if pattern.lower() in lowered:
+            return f"disallowed pattern: {pattern!r}"
+    return None
+
+
+def _run_analysis(ctx: RunContext[Deps], data: dict, script: str) -> str:
+    """Run a Python summarization script on query result data locally.
+
+    data: dict with keys "columns" (list[str]) and "rows" (list[list]).
+          Pass the raw output from run_query directly.
+    script: Python code that reads JSON from stdin ({"columns":..., "rows":...})
+            and prints a JSON summary to stdout. Only stdlib math/statistics/
+            json/collections/itertools/functools/operator/decimal/fractions
+            are allowed. No file I/O, no network, no subprocess.
+
+    Returns JSON: {"success": true, "summary": <parsed output>}
+    or {"success": false, "error": "..."}.
+    """
+    err = _validate_script(script)
+    if err:
+        return json.dumps({"success": False, "error": f"script rejected — {err}"})
+
+    stdin_payload = json.dumps(data)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            input=stdin_payload,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"success": False, "error": "script timeout (5s)"})
+    except Exception as exc:
+        return json.dumps({"success": False, "error": str(exc)})
+
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip()[:500]
+        return json.dumps({"success": False, "error": f"script error: {stderr}"})
+
+    raw = proc.stdout.strip()
+    try:
+        summary = json.loads(raw)
+    except json.JSONDecodeError:
+        # Return raw text if script didn't produce JSON
+        summary = raw[:2000]
+
+    return json.dumps({"success": True, "summary": summary})
 
 
 def _update_dashboard(
@@ -239,7 +319,7 @@ def run_agent() -> None:
         deps_type=Deps,
         output_type=AgentResponse,
         system_prompt=system_prompt,
-        tools=[_run_query, _update_dashboard],
+        tools=[_run_query, _run_analysis, _update_dashboard],
     )
 
     print(f"SRE Copilot  [{_MODEL}]  type 'exit' to quit\n")
