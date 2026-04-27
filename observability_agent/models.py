@@ -30,6 +30,21 @@ class DashboardState(BaseModel):
     updated_at: float = 0.0
 
 
+class DashboardUpdate(BaseModel):
+    """Partial dashboard state for agent tool — only set fields are applied."""
+
+    panels: list[PanelName] | None = None
+    timeseries_metric: MetricName | None = None
+    timeseries_service: ServiceFilter | None = None
+    log_level: LogLevel | None = None
+    log_keyword: str | None = None
+    log_service: ServiceFilter | None = None
+    time_range_minutes: TimeRange | None = None
+    agent_status: AgentStatus | None = None
+    agent_last_action: str | None = None
+    frozen: bool | None = None
+
+
 class AgentResponse(BaseModel):
     accepted: bool
     rejection_reason: str | None

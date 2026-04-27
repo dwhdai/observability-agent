@@ -14,15 +14,7 @@ from pydantic_ai import Agent, RunContext, UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
 
 from observability_agent.db import get_db_path
-from observability_agent.models import (
-    AgentResponse,
-    AgentStatus,
-    LogLevel,
-    MetricName,
-    PanelName,
-    ServiceFilter,
-    TimeRange,
-)
+from observability_agent.models import AgentResponse, DashboardUpdate
 
 # ── Deps ─────────────────────────────────────────────────────────────────────
 
@@ -127,16 +119,29 @@ Elaborate triggers — if the user message contains any of these words/phrases:
 - Prefer `WHERE timestamp > (unixepoch() - N)` for time filters.
 - For accepted responses, set `accepted=true` and `rejection_reason=null`.
 
-## Data summarization (`run_analysis` tool)
+## Querying data (`run_analysis` tool)
 
-When a query returns many rows, use `run_analysis` instead of passing raw rows to your reasoning.
-Pass the query result dict directly as `data`, then write a short Python script that:
-- Reads `import json, sys; d = json.load(sys.stdin)` to get columns + rows
-- Computes distribution metrics: averages, min/max, percentiles, rolling averages, rate of change, counts, etc.
-- Prints a single JSON object to stdout summarizing the data
+Raw rows are NEVER returned to you. Always provide a `script` parameter.
 
-Allowed stdlib only: json, math, statistics, collections, itertools, functools, operator, decimal, fractions.
-No file I/O, no network, no subprocess. Script must print valid JSON to stdout.
+The script receives {{"columns": [...], "rows": [...]}} on stdin and must print a JSON
+summary to stdout. Use it to compute: averages, min/max, percentiles, rolling averages,
+rate of change, counts, stddev, etc.
+
+Omit `script` only when you need to inspect column names or row count before writing a script.
+
+Allowed stdlib: json, math, statistics, collections, itertools, functools, operator, decimal, fractions.
+No file I/O, no network, no subprocess.
+
+Example script skeleton:
+```python
+import json, sys, statistics
+d = json.load(sys.stdin)
+cols = d["columns"]
+rows = d["rows"]
+idx = cols.index("value")
+vals = [r[idx] for r in rows]
+print(json.dumps({{"mean": statistics.mean(vals), "p99": sorted(vals)[int(len(vals)*0.99)], "max": max(vals)}}))
+```
 """.strip()
 
 
@@ -147,51 +152,6 @@ _USAGE_LIMITS = UsageLimits(request_limit=25)
 
 # ── Tool implementations ──────────────────────────────────────────────────────
 
-
-def _run_query(ctx: RunContext[Deps], sql: str) -> str:
-    """Execute a read-only SQL query against the observability DB.
-
-    Returns JSON: {"success": true, "columns": [...], "rows": [...]}
-    or {"success": false, "error": "..."} on failure.
-    Row cap: 100 rows. Timeout: 2 seconds.
-    """
-    db_path = ctx.deps.db_path
-    try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
-        result: dict = {}
-
-        def _execute() -> None:
-            try:
-                cur = conn.execute(sql)
-                result["rows"] = cur.fetchmany(100)
-                result["desc"] = cur.description
-            except Exception as exc:
-                result["error"] = str(exc)
-
-        t = threading.Thread(target=_execute, daemon=True)
-        t.start()
-        t.join(timeout=2.0)
-        if t.is_alive():
-            conn.interrupt()
-            t.join()
-            conn.close()
-            return json.dumps({"success": False, "error": "query timeout (2s)"})
-
-        conn.close()
-        if "error" in result:
-            return json.dumps({"success": False, "error": result["error"]})
-
-        columns = [d[0] for d in result["desc"]] if result.get("desc") else []
-        return json.dumps({"success": True, "columns": columns, "rows": result["rows"]})
-
-    except Exception as exc:
-        return json.dumps({"success": False, "error": str(exc)})
-
-
-_ALLOWED_IMPORTS = frozenset({
-    "json", "math", "statistics", "collections", "itertools",
-    "functools", "operator", "decimal", "fractions",
-})
 
 _BLOCKED_PATTERNS = [
     "import os", "import sys", "import subprocess", "import socket",
@@ -210,78 +170,111 @@ def _validate_script(script: str) -> str | None:
     return None
 
 
-def _run_analysis(ctx: RunContext[Deps], data: dict, script: str) -> str:
-    """Run a Python summarization script on query result data locally.
+def _run_analysis(ctx: RunContext[Deps], sql: str, script: str | None = None) -> str:
+    """Execute a read-only SQL query against the observability DB.
 
-    data: dict with keys "columns" (list[str]) and "rows" (list[list]).
-          Pass the raw output from run_query directly.
-    script: Python code that reads JSON from stdin ({"columns":..., "rows":...})
-            and prints a JSON summary to stdout. Only stdlib math/statistics/
-            json/collections/itertools/functools/operator/decimal/fractions
-            are allowed. No file I/O, no network, no subprocess.
+    Raw rows are never returned to avoid bloating context.
 
-    Returns JSON: {"success": true, "summary": <parsed output>}
+    If script is None: returns columns, row count, and a 3-row sample only.
+    If script is provided: pipes all rows (up to 500) into the script via stdin
+      as JSON {"columns": [...], "rows": [...]} and returns the script's stdout.
+
+    script must read JSON from stdin and print a JSON summary to stdout.
+    Allowed stdlib: json, math, statistics, collections, itertools, functools,
+    operator, decimal, fractions. No file I/O, no network, no subprocess.
+
+    Returns JSON: {"success": true, "columns": [...], "row_count": N, "sample": [...]}
+    or {"success": true, "summary": <script output>}
     or {"success": false, "error": "..."}.
+    Row fetch cap: 500. Query timeout: 2 seconds. Script timeout: 5 seconds.
     """
-    err = _validate_script(script)
-    if err:
-        return json.dumps({"success": False, "error": f"script rejected — {err}"})
+    if script is not None:
+        err = _validate_script(script)
+        if err:
+            return json.dumps({"success": False, "error": f"script rejected — {err}"})
 
-    stdin_payload = json.dumps(data)
+    db_path = ctx.deps.db_path
     try:
-        proc = subprocess.run(
-            [sys.executable, "-c", script],
-            input=stdin_payload,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except subprocess.TimeoutExpired:
-        return json.dumps({"success": False, "error": "script timeout (5s)"})
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+        result: dict = {}
+
+        cap = 500 if script is not None else 100
+
+        def _execute() -> None:
+            try:
+                cur = conn.execute(sql)
+                result["rows"] = cur.fetchmany(cap)
+                result["desc"] = cur.description
+            except Exception as exc:
+                result["error"] = str(exc)
+
+        t = threading.Thread(target=_execute, daemon=True)
+        t.start()
+        t.join(timeout=2.0)
+        if t.is_alive():
+            conn.interrupt()
+            t.join()
+            conn.close()
+            return json.dumps({"success": False, "error": "query timeout (2s)"})
+
+        conn.close()
+        if "error" in result:
+            return json.dumps({"success": False, "error": result["error"]})
+
+        columns = [d[0] for d in result["desc"]] if result.get("desc") else []
+        rows = result["rows"]
+
+        if script is None:
+            return json.dumps({
+                "success": True,
+                "columns": columns,
+                "row_count": len(rows),
+                "sample": rows[:3],
+            })
+
+        # Run summarization script
+        stdin_payload = json.dumps({"columns": columns, "rows": rows})
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", script],
+                input=stdin_payload,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except subprocess.TimeoutExpired:
+            return json.dumps({"success": False, "error": "script timeout (5s)"})
+
+        if proc.returncode != 0:
+            return json.dumps({"success": False, "error": f"script error: {proc.stderr.strip()[:500]}"})
+
+        raw = proc.stdout.strip()
+        try:
+            summary = json.loads(raw)
+        except json.JSONDecodeError:
+            summary = raw[:2000]
+
+        return json.dumps({"success": True, "summary": summary})
+
     except Exception as exc:
         return json.dumps({"success": False, "error": str(exc)})
 
-    if proc.returncode != 0:
-        stderr = proc.stderr.strip()[:500]
-        return json.dumps({"success": False, "error": f"script error: {stderr}"})
 
-    raw = proc.stdout.strip()
-    try:
-        summary = json.loads(raw)
-    except json.JSONDecodeError:
-        # Return raw text if script didn't produce JSON
-        summary = raw[:2000]
-
-    return json.dumps({"success": True, "summary": summary})
-
-
-def _update_dashboard(
-    ctx: RunContext[Deps],
-    panels: list[PanelName] | None = None,
-    timeseries_metric: MetricName | None = None,
-    timeseries_service: ServiceFilter | None = None,
-    log_level: LogLevel | None = None,
-    log_keyword: str | None = None,
-    log_service: ServiceFilter | None = None,
-    time_range_minutes: TimeRange | None = None,
-    agent_status: AgentStatus | None = None,
-    agent_last_action: str | None = None,
-    frozen: bool | None = None,
-) -> str:
+def _update_dashboard(ctx: RunContext[Deps], update: DashboardUpdate) -> str:
     """Update the TUI dashboard state. Only supplied fields are changed (merge semantics).
 
-    panels: visible panels — any subset of ["overview","timeseries","histogram","logs"]
-    timeseries_metric: metric shown in both charts — latency_p99/error_rate/req_per_sec/cpu_usage
-    timeseries_service: service filter for both charts ("all" = all services)
-    log_level: "all" or DEBUG/INFO/WARN/ERROR
-    log_keyword: substring filter on log messages (empty = no filter)
-    log_service: service filter for logs ("all" or a specific service name)
-    time_range_minutes: history window — 5, 10, 15, or 30
-    agent_status: idle/thinking/querying/done/error — shown in TUI footer
-    agent_last_action: human-readable description of last action shown in TUI footer
-    frozen: true = freeze UI refresh so user can inspect current view; false = resume live updates
+    update.panels: visible panels — any subset of ["overview","timeseries","histogram","logs"]
+    update.timeseries_metric: metric shown in both charts — latency_p99/error_rate/req_per_sec/cpu_usage
+    update.timeseries_service: service filter for both charts ("all" = all services)
+    update.log_level: "all" or DEBUG/INFO/WARN/ERROR
+    update.log_keyword: substring filter on log messages (empty = no filter)
+    update.log_service: service filter for logs ("all" or a specific service name)
+    update.time_range_minutes: history window — 5, 10, 15, or 30
+    update.agent_status: idle/thinking/querying/done/error — shown in TUI footer
+    update.agent_last_action: human-readable description of last action shown in TUI footer
+    update.frozen: true = freeze UI refresh so user can inspect current view; false = resume live updates
     """
-    fields: dict = {k: v for k, v in locals().items() if k != "ctx" and v is not None}
+    fields: dict = {k: v for k, v in update.model_dump(exclude_none=True).items()}
     if "panels" in fields:
         fields["panels"] = json.dumps(fields["panels"])
     if "frozen" in fields:
@@ -319,7 +312,7 @@ def run_agent() -> None:
         deps_type=Deps,
         output_type=AgentResponse,
         system_prompt=system_prompt,
-        tools=[_run_query, _run_analysis, _update_dashboard],
+        tools=[_run_analysis, _update_dashboard],
     )
 
     print(f"SRE Copilot  [{_MODEL}]  type 'exit' to quit\n")
