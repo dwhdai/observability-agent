@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Observability Agent — Design Document</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #1f2937;
+    --border: #30363d;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --accent3: #d2a8ff;
+    --accent4: #ffa657;
+    --accent5: #f85149;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --code-bg: #0d1117;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    padding: 0 0 80px;
+  }
+
+  /* ── Header ─────────────────────────────────── */
+  header {
+    background: linear-gradient(135deg, #0d1117 0%, #161b22 50%, #0d2340 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 64px 48px 48px;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+
+  header .badge {
+    display: inline-block;
+    background: rgba(88,166,255,0.15);
+    border: 1px solid rgba(88,166,255,0.4);
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 4px 12px;
+    border-radius: 20px;
+    margin-bottom: 20px;
+  }
+
+  h1 {
+    font-size: 42px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    line-height: 1.2;
+    margin-bottom: 16px;
+  }
+
+  h1 span { color: var(--accent); }
+
+  header p {
+    color: var(--muted);
+    font-size: 17px;
+    max-width: 620px;
+    line-height: 1.7;
+  }
+
+  /* ── Layout ──────────────────────────────────── */
+  .page { max-width: 1100px; margin: 0 auto; padding: 0 48px; }
+
+  section { margin-top: 64px; }
+
+  h2 {
+    font-size: 24px;
+    font-weight: 600;
+    margin-bottom: 28px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  h2 .icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 6px;
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+
+  h3 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: var(--accent);
+  }
+
+  p { color: var(--muted); margin-bottom: 12px; }
+
+  code {
+    font-family: "SF Mono", "Fira Code", Consolas, monospace;
+    font-size: 13px;
+    background: rgba(255,255,255,0.06);
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: var(--accent3);
+  }
+
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    overflow-x: auto;
+    font-family: "SF Mono", "Fira Code", Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--text);
+  }
+
+  pre .kw  { color: #ff7b72; }
+  pre .fn  { color: #d2a8ff; }
+  pre .str { color: #a5d6ff; }
+  pre .cmt { color: #8b949e; font-style: italic; }
+  pre .num { color: #ffa657; }
+  pre .typ { color: #3fb950; }
+
+  /* ── Cards ───────────────────────────────────── */
+  .grid {
+    display: grid;
+    gap: 16px;
+  }
+
+  .grid-2 { grid-template-columns: 1fr 1fr; }
+  .grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    transition: border-color 0.2s;
+  }
+
+  .card:hover { border-color: rgba(88,166,255,0.4); }
+
+  .card-icon {
+    font-size: 28px;
+    margin-bottom: 14px;
+    display: block;
+  }
+
+  .card h3 { color: var(--text); margin-bottom: 8px; font-size: 15px; }
+  .card p  { font-size: 14px; margin: 0; }
+
+  /* ── Architecture diagram ────────────────────── */
+  .arch-diagram {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 40px;
+    overflow-x: auto;
+  }
+
+  .arch-row {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin: 8px 0;
+  }
+
+  .arch-box {
+    border-radius: 8px;
+    padding: 12px 20px;
+    font-size: 14px;
+    font-weight: 600;
+    text-align: center;
+    min-width: 150px;
+    line-height: 1.4;
+  }
+
+  .box-blue   { background: rgba(88,166,255,0.15);  border: 1.5px solid rgba(88,166,255,0.5);  color: #58a6ff; }
+  .box-green  { background: rgba(63,185,80,0.15);   border: 1.5px solid rgba(63,185,80,0.5);   color: #3fb950; }
+  .box-purple { background: rgba(210,168,255,0.15); border: 1.5px solid rgba(210,168,255,0.5); color: #d2a8ff; }
+  .box-orange { background: rgba(255,166,87,0.15);  border: 1.5px solid rgba(255,166,87,0.5);  color: #ffa657; }
+  .box-red    { background: rgba(248,81,73,0.15);   border: 1.5px solid rgba(248,81,73,0.5);   color: #f85149; }
+  .box-gray   { background: rgba(139,148,158,0.1);  border: 1.5px solid rgba(139,148,158,0.3); color: #8b949e; }
+
+  .arch-arrow {
+    color: var(--muted);
+    font-size: 18px;
+    padding: 0 8px;
+    flex-shrink: 0;
+  }
+
+  .arch-label {
+    font-size: 11px;
+    color: var(--muted);
+    text-align: center;
+    margin: 4px 0 16px;
+    font-style: italic;
+  }
+
+  .arch-section-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    text-align: center;
+    margin-bottom: 8px;
+    font-weight: 600;
+  }
+
+  /* ── Flow diagram ────────────────────────────── */
+  .flow {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .flow-step {
+    display: flex;
+    gap: 16px;
+    position: relative;
+  }
+
+  .flow-step:not(:last-child) .flow-line {
+    position: absolute;
+    left: 19px;
+    top: 40px;
+    bottom: 0;
+    width: 2px;
+    background: var(--border);
+  }
+
+  .flow-dot {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 14px;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 1;
+  }
+
+  .flow-content {
+    padding: 8px 0 32px;
+    flex: 1;
+  }
+
+  .flow-content h3 { color: var(--text); margin-bottom: 6px; font-size: 15px; }
+  .flow-content p  { font-size: 14px; margin-bottom: 6px; }
+
+  /* ── Pill tags ───────────────────────────────── */
+  .tags { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+
+  .tag {
+    font-size: 12px;
+    font-weight: 500;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-family: "SF Mono", Consolas, monospace;
+  }
+
+  .tag-blue   { background: rgba(88,166,255,0.12);  color: #58a6ff;  border: 1px solid rgba(88,166,255,0.3); }
+  .tag-green  { background: rgba(63,185,80,0.12);   color: #3fb950;  border: 1px solid rgba(63,185,80,0.3); }
+  .tag-purple { background: rgba(210,168,255,0.12); color: #d2a8ff;  border: 1px solid rgba(210,168,255,0.3); }
+  .tag-orange { background: rgba(255,166,87,0.12);  color: #ffa657;  border: 1px solid rgba(255,166,87,0.3); }
+
+  /* ── Pattern table ───────────────────────────── */
+  .pattern-table {
+    width: 100%;
+    border-collapse: collapse;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+
+  .pattern-table th {
+    background: var(--surface2);
+    color: var(--muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+    padding: 12px 16px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .pattern-table td {
+    padding: 13px 16px;
+    font-size: 14px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+
+  .pattern-table tr:last-child td { border-bottom: none; }
+  .pattern-table tr:hover td { background: rgba(255,255,255,0.02); }
+  .pattern-table td:first-child { font-weight: 600; color: var(--text); width: 220px; }
+  .pattern-table td:last-child { color: var(--muted); }
+
+  /* ── Divider ─────────────────────────────────── */
+  .divider { border: none; border-top: 1px solid var(--border); margin: 8px 0 24px; }
+
+  /* ── Callout ─────────────────────────────────── */
+  .callout {
+    background: rgba(88,166,255,0.08);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 8px 8px 0;
+    padding: 16px 20px;
+    margin: 16px 0;
+    font-size: 14px;
+    color: var(--muted);
+  }
+
+  .callout strong { color: var(--accent); }
+
+  /* ── Responsive ──────────────────────────────── */
+  @media (max-width: 760px) {
+    header { padding: 40px 24px 32px; }
+    .page  { padding: 0 24px; }
+    h1     { font-size: 28px; }
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="badge">Design Document</div>
+  <h1>Observability <span>Agent</span></h1>
+  <p>An autonomous SRE copilot that monitors distributed services, detects anomalies, diagnoses root causes, and updates a live dashboard — all through natural language.</p>
+</header>
+
+<div class="page">
+
+  <!-- ── Overview ───────────────────────────────── -->
+  <section>
+    <h2><span class="icon" style="background:rgba(88,166,255,0.15)">⚡</span> System Overview</h2>
+
+    <div class="arch-diagram">
+      <div class="arch-section-label">User Interface</div>
+      <div class="arch-row">
+        <div class="arch-box box-blue">CLI Chat<br><small style="font-weight:400;opacity:0.8">agent.py</small></div>
+        <div class="arch-arrow">↔</div>
+        <div class="arch-box box-purple">TUI Dashboard<br><small style="font-weight:400;opacity:0.8">tui.py + panels.py</small></div>
+      </div>
+
+      <div style="display:flex;justify-content:center;gap:60px;margin:4px 0">
+        <div style="color:var(--muted);font-size:18px">↕</div>
+        <div style="color:var(--muted);font-size:18px">↕</div>
+      </div>
+
+      <div class="arch-section-label">Intelligence Layer</div>
+      <div class="arch-row">
+        <div class="arch-box box-green">Pydantic AI Agent<br><small style="font-weight:400;opacity:0.8">Multi-turn · Tool use · Structured output</small></div>
+      </div>
+
+      <div style="display:flex;justify-content:center;margin:4px 0">
+        <div style="color:var(--muted);font-size:18px">↕</div>
+      </div>
+
+      <div class="arch-section-label">Shared State (IPC)</div>
+      <div class="arch-row">
+        <div class="arch-box box-orange">SQLite (WAL mode)<br><small style="font-weight:400;opacity:0.8">metrics · logs · dashboard_state</small></div>
+      </div>
+    </div>
+
+    <div class="callout" style="margin-top:20px">
+      <strong>Key architectural insight:</strong> SQLite serves as the inter-process communication channel. The agent writes dashboard state; the TUI polls and renders it — no message passing required.
+    </div>
+  </section>
+
+  <!-- ── Capabilities ────────────────────────────── -->
+  <section>
+    <h2><span class="icon" style="background:rgba(63,185,80,0.15)">🔍</span> Agent Capabilities</h2>
+    <div class="grid grid-3">
+      <div class="card">
+        <span class="card-icon">🗄️</span>
+        <h3>DB Querying</h3>
+        <p>Agent generates and executes SQL against live metrics and logs tables. Retrieves targeted, structured results rather than requiring raw data to be loaded into context.</p>
+      </div>
+      <div class="card">
+        <span class="card-icon">⚙️</span>
+        <h3>Sandboxed Code Execution</h3>
+        <p>Agent generates Python analysis scripts — stats, percentiles, aggregations — that run in a sandboxed subprocess. Only the computed result returns to the model, offloading computation and keeping message history lean.</p>
+      </div>
+      <div class="card">
+        <span class="card-icon">🎛️</span>
+        <h3>Control Dashboard</h3>
+        <p>Updates filters (service, metric, log level, time range) and freezes the UI for focused inspection during diagnosis.</p>
+      </div>
+      <div class="card">
+        <span class="card-icon">🛡️</span>
+        <h3>Scope Validation</h3>
+        <p>Rejects out-of-scope queries with structured refusals. Dynamic system prompt built from live DB introspection prevents hallucination.</p>
+      </div>
+      <div class="card">
+        <span class="card-icon">📝</span>
+        <h3>Audit Logging</h3>
+        <p>Every session produces a JSONL trace with full message history, tool calls, timestamps, and rejection reasons.</p>
+      </div>
+      <div class="card">
+        <span class="card-icon">🔗</span>
+        <h3>Multi-turn Context</h3>
+        <p>Maintains full conversation history across turns. Supports follow-up questions, clarifications, and iterative investigation.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Request lifecycle ────────────────────────── -->
+  <section>
+    <h2><span class="icon" style="background:rgba(210,168,255,0.15)">🔄</span> Request Lifecycle</h2>
+
+    <div class="flow">
+      <div class="flow-step">
+        <div class="flow-line"></div>
+        <div class="flow-dot box-blue" style="border-radius:50%">1</div>
+        <div class="flow-content">
+          <h3>User Input</h3>
+          <p>Natural language query enters the chat loop. Usage limits enforced: max 25 tool calls per session to prevent runaway execution.</p>
+          <div class="tags">
+            <span class="tag tag-blue">UsageLimits(request_limit=25)</span>
+            <span class="tag tag-blue">message_history preserved</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="flow-step">
+        <div class="flow-line"></div>
+        <div class="flow-dot box-purple" style="border-radius:50%">2</div>
+        <div class="flow-content">
+          <h3>Scope Check via Structured Output</h3>
+          <p>Model returns <code>AgentResponse(accepted: bool, rejection_reason, response)</code>. Out-of-scope queries are caught at the type level — not post-hoc.</p>
+          <div class="tags">
+            <span class="tag tag-purple">output_type=AgentResponse</span>
+            <span class="tag tag-purple">Pydantic validation</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="flow-step">
+        <div class="flow-line"></div>
+        <div class="flow-dot box-green" style="border-radius:50%">3</div>
+        <div class="flow-content">
+          <h3>Tool Dispatch</h3>
+          <p>Agent selects tools based on intent. Can chain multiple calls in a single turn. Tools injected via <code>RunContext[Deps]</code> dependency pattern.</p>
+          <div class="grid grid-2" style="margin-top:12px;gap:12px">
+            <div class="card" style="padding:16px">
+              <h3 style="color:var(--accent2)">_run_analysis</h3>
+              <p style="margin:0">Execute SQL + optional Python script. Row cap: 500. Timeout: 2s SQL / 5s script.</p>
+            </div>
+            <div class="card" style="padding:16px">
+              <h3 style="color:var(--accent4)">_update_dashboard</h3>
+              <p style="margin:0">Merge partial <code>DashboardUpdate</code> into shared state. Type-safe, merge semantics only.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flow-step">
+        <div class="flow-line"></div>
+        <div class="flow-dot box-orange" style="border-radius:50%">4</div>
+        <div class="flow-content">
+          <h3>Tool Execution (Sandboxed)</h3>
+          <p>Python post-processors run in a subprocess with blocklist validation. Blocked patterns: <code>import os</code>, <code>open(</code>, <code>exec(</code>, network calls. Allows math/stats only.</p>
+          <div class="tags">
+            <span class="tag tag-orange">blocklist validation</span>
+            <span class="tag tag-orange">threading + interrupt</span>
+            <span class="tag tag-orange">no filesystem/network</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="flow-step">
+        <div class="flow-dot box-green" style="border-radius:50%">5</div>
+        <div class="flow-content">
+          <h3>Response + Trace</h3>
+          <p>Structured response returned to user. Full session written to <code>agent_traces/&lt;timestamp&gt;.jsonl</code>. History appended for next turn.</p>
+          <div class="tags">
+            <span class="tag tag-green">JSONL audit log</span>
+            <span class="tag tag-green">result.all_messages()</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Dynamic Prompting ──────────────────────── -->
+  <section>
+    <h2><span class="icon" style="background:rgba(255,166,87,0.15)">🧠</span> Dynamic System Prompt</h2>
+    <p>The system prompt is rebuilt each session from live DB introspection — not hardcoded. This grounds the agent in the actual available data and prevents hallucination about non-existent services or metrics.</p>
+
+    <pre><span class="cmt"># agent.py — _build_system_prompt()</span>
+
+<span class="kw">def</span> <span class="fn">_build_system_prompt</span>(available_data: dict) -> str:
+    services = available_data[<span class="str">"services"</span>]   <span class="cmt"># queried from DB at startup</span>
+    metrics  = available_data[<span class="str">"metrics"</span>]    <span class="cmt"># ["latency_p99", "error_rate", ...]</span>
+
+    <span class="kw">return</span> f<span class="str">"""
+You are an SRE observability assistant. You ONLY answer questions about
+the metrics and logs in the database.
+
+Available services: {services}
+Available metrics:  {metrics}
+Data window:        last 30 minutes at 5s resolution
+
+Health thresholds:
+  - latency_p99 > 500ms  → degraded
+  - error_rate  > 0.5%   → degraded
+  - cpu_usage   > 80%    → degraded
+
+STRICT: Reject any query not answerable from this data.
+Set accepted=False and populate rejection_reason.
+"""</span></pre>
+  </section>
+
+  <!-- ── Design Patterns ────────────────────────── -->
+  <section>
+    <h2><span class="icon" style="background:rgba(63,185,80,0.15)">📐</span> Design Patterns</h2>
+
+    <table class="pattern-table">
+      <thead>
+        <tr>
+          <th>Pattern</th>
+          <th>Implementation</th>
+          <th>Purpose</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Multi-turn chat loop</td>
+          <td><code>agent.run_sync(…, message_history)</code></td>
+          <td>Preserves conversation context across turns for follow-up investigation</td>
+        </tr>
+        <tr>
+          <td>Dependency injection</td>
+          <td><code>Deps(db_path)</code> via <code>RunContext[Deps]</code></td>
+          <td>Tools receive runtime context (DB path) without global state</td>
+        </tr>
+        <tr>
+          <td>Structured output</td>
+          <td><code>output_type=AgentResponse</code> (Pydantic)</td>
+          <td>Scope validation and rejection reason are enforced at the type level</td>
+        </tr>
+        <tr>
+          <td>Dynamic prompting</td>
+          <td><code>_build_system_prompt(available_data)</code></td>
+          <td>Prompt grounded in live DB contents — no hardcoded service names</td>
+        </tr>
+        <tr>
+          <td>Tool sandboxing</td>
+          <td>Blocklist + threading timeout</td>
+          <td>Allows math/stats scripts; blocks filesystem, network, and subprocess access</td>
+        </tr>
+        <tr>
+          <td>DB as IPC</td>
+          <td>SQLite WAL, single <code>dashboard_state</code> row</td>
+          <td>Agent and TUI share state atomically without message passing</td>
+        </tr>
+        <tr>
+          <td>Usage limits</td>
+          <td><code>UsageLimits(request_limit=25)</code></td>
+          <td>Hard cap prevents infinite tool loops and runaway costs</td>
+        </tr>
+        <tr>
+          <td>Audit logging</td>
+          <td>Per-session JSONL via <code>logging.py</code></td>
+          <td>Full message history, tool calls, and rejections recorded for analysis</td>
+        </tr>
+        <tr>
+          <td>Freezeable UI</td>
+          <td><code>DashboardState.frozen = true</code></td>
+          <td>Agent can pause dashboard refresh during synchronous inspection windows</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ── TUI ─────────────────────────────────────── -->
+  <section>
+    <h2><span class="icon" style="background:rgba(139,148,158,0.12)">🖥️</span> TUI App </h2>
+
+    <div class="grid grid-2">
+      <div class="card">
+        <h3>Panel Architecture</h3>
+        <p>Abstract <code>Panel</code> base class with template methods: <code>make_widget()</code>, <code>poll(state)</code>, <code>on_mount()</code>. Each panel owns its widget and self-refreshes on 0.5s interval from DB state.</p>
+        <div class="tags">
+          <span class="tag tag-blue">Overview</span>
+          <span class="tag tag-blue">TimeSeries</span>
+          <span class="tag tag-blue">Histogram</span>
+          <span class="tag tag-blue">Logs</span>
+        </div>
+      </div>
+      <div class="card">
+        <h3>State Model</h3>
+        <p><code>DashboardState</code> Pydantic model holds all view config: active panels, metric/service filters, time range, log filters, agent status, and frozen flag. Persisted as single DB row.</p>
+        <div class="tags">
+          <span class="tag tag-purple">Textual framework</span>
+          <span class="tag tag-purple">PlotExt charts</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Key Files ──────────────────────────────── -->
+  <section>
+    <h2><span class="icon" style="background:rgba(248,81,73,0.12)">📁</span> Key Files</h2>
+
+    <table class="pattern-table">
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Role</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>agent.py</code></td>
+          <td>Agent construction, chat loop, tool implementations, dynamic prompt builder, scope validation</td>
+        </tr>
+        <tr>
+          <td><code>models.py</code></td>
+          <td>Pydantic models — <code>AgentResponse</code>, <code>DashboardState</code>, <code>DashboardUpdate</code></td>
+        </tr>
+        <tr>
+          <td><code>tui.py</code></td>
+          <td>Textual app, 0.5s polling loop, panel composition, state reads, freeze toggle</td>
+        </tr>
+        <tr>
+          <td><code>panels.py</code></td>
+          <td>Abstract Panel base + 4 concrete panels (overview, timeseries, histogram, logs)</td>
+        </tr>
+        <tr>
+          <td><code>logging.py</code></td>
+          <td>JSONL trace setup — records full message history per session</td>
+        </tr>
+        <tr>
+          <td><code>app.py</code></td>
+          <td>CLI entry point — <code>tui</code> and <code>agent</code> subcommands via argparse</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+</div>
+</body>
+</html>
