@@ -55,12 +55,18 @@ def init_db(db_path: str | None = None) -> None:
                 time_range_minutes  INTEGER DEFAULT 30,
                 agent_status        TEXT    DEFAULT 'idle',
                 agent_last_action   TEXT    DEFAULT '',
+                frozen              INTEGER DEFAULT 0,
                 terminal_width      INTEGER DEFAULT 0,
                 terminal_height     INTEGER DEFAULT 0,
                 updated_at          REAL    DEFAULT 0
             )
         """)
         conn.execute("INSERT OR IGNORE INTO dashboard_state (id) VALUES (1)")
+        # Migration: add frozen column to existing DBs
+        try:
+            conn.execute("ALTER TABLE dashboard_state ADD COLUMN frozen INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 def reset_dashboard_state(db_path: str | None = None) -> None:
@@ -82,7 +88,8 @@ def reset_dashboard_state(db_path: str | None = None) -> None:
                 log_service         = ?,
                 time_range_minutes  = ?,
                 agent_status        = ?,
-                agent_last_action   = ?
+                agent_last_action   = ?,
+                frozen              = ?
             WHERE id = 1""",
             (
                 json.dumps(s.panels),
@@ -90,5 +97,6 @@ def reset_dashboard_state(db_path: str | None = None) -> None:
                 s.timeseries_metric, s.timeseries_service,  # histogram mirrors timeseries
                 s.log_level, s.log_keyword, s.log_service,
                 s.time_range_minutes, s.agent_status, s.agent_last_action,
+                int(s.frozen),
             ),
         )

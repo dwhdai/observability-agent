@@ -99,6 +99,7 @@ Metrics: {metrics_str}
   time_range_minutes  INT    history window in minutes — 5, 10, 15, or 30
   agent_status        TEXT   one of: idle/thinking/querying/done/error — shown in TUI footer
   agent_last_action   TEXT   human-readable description of last action shown in TUI footer
+  frozen              INT    0/1 — when 1, TUI stops refreshing panels so user can inspect current view
 
 ## Health thresholds
 - latency_p99:  >100ms warn,  >300ms critical
@@ -117,6 +118,9 @@ Elaborate triggers — if the user message contains any of these words/phrases:
 - Investigate by querying the DB (`run_query` tool). Correlate metrics with logs.
 - When you spot an issue, update the dashboard (`update_dashboard` tool) to focus on it.
 - Narrate: tell the engineer what you found AND mention when you've updated the dashboard.
+- When a user asks to "zoom in", "look at", "focus on", or "freeze" a view, set `frozen=true` after
+  updating the relevant filters/panels so they can inspect without the display changing under them.
+  Set `frozen=false` when they say "unfreeze", "resume", or "continue".
 - Keep SQL simple — the DB holds ~30 minutes of data at 5-second resolution.
 - Prefer `WHERE timestamp > (unixepoch() - N)` for time filters.
 - For accepted responses, set `accepted=true` and `rejection_reason=null`.
@@ -182,6 +186,7 @@ def _update_dashboard(
     time_range_minutes: TimeRange | None = None,
     agent_status: AgentStatus | None = None,
     agent_last_action: str | None = None,
+    frozen: bool | None = None,
 ) -> str:
     """Update the TUI dashboard state. Only supplied fields are changed (merge semantics).
 
@@ -194,10 +199,13 @@ def _update_dashboard(
     time_range_minutes: history window — 5, 10, 15, or 30
     agent_status: idle/thinking/querying/done/error — shown in TUI footer
     agent_last_action: human-readable description of last action shown in TUI footer
+    frozen: true = freeze UI refresh so user can inspect current view; false = resume live updates
     """
     fields: dict = {k: v for k, v in locals().items() if k != "ctx" and v is not None}
     if "panels" in fields:
         fields["panels"] = json.dumps(fields["panels"])
+    if "frozen" in fields:
+        fields["frozen"] = int(fields["frozen"])
     fields["updated_at"] = time.time()
 
     set_clause = ", ".join(f"{k} = ?" for k in fields)
@@ -264,7 +272,7 @@ def run_agent() -> None:
                 "accepted": output.accepted,
                 "rejection_reason": output.rejection_reason,
                 "response": output.response,
-                "messages": json.loads(result.all_messages_json()),
+                "messages": json.loads(result.new_messages_json()),
             }))
             print(output.response)
             history = result.all_messages()

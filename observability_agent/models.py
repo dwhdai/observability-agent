@@ -26,6 +26,7 @@ class DashboardState(BaseModel):
     time_range_minutes: TimeRange = 30
     agent_status: AgentStatus = "idle"
     agent_last_action: str = ""
+    frozen: bool = False
     updated_at: float = 0.0
 
 

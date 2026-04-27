@@ -17,7 +17,7 @@ from observability_agent.synthetic import backfill, reset_scenario, stream
 
 class ObservabilityTUI(App):
     TITLE = "Observability Dashboard"
-    BINDINGS = [("q", "quit", "Quit"), ("r", "reset", "Reset view")]
+    BINDINGS = [("q", "quit", "Quit"), ("r", "reset", "Reset view"), ("f", "toggle_freeze", "Freeze")]
 
     CSS = """
     Screen {
@@ -91,6 +91,18 @@ class ObservabilityTUI(App):
     def action_reset(self) -> None:
         reset_dashboard_state(self._db_path)
 
+    def action_toggle_freeze(self) -> None:
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                row = conn.execute("SELECT frozen FROM dashboard_state WHERE id = 1").fetchone()
+                current = bool(row[0]) if row else False
+                conn.execute(
+                    "UPDATE dashboard_state SET frozen = ? WHERE id = 1",
+                    (0 if current else 1,),
+                )
+        except Exception:
+            logging.warning("Failed to toggle freeze", exc_info=True)
+
     def _start_data_thread(self) -> None:
         db_path = self._db_path
         stop_event = self._stop_event
@@ -110,7 +122,7 @@ class ObservabilityTUI(App):
                     "SELECT panels, timeseries_metric, timeseries_service,"
                     "       log_level, log_keyword, log_service,"
                     "       time_range_minutes,"
-                    "       agent_status, agent_last_action, updated_at"
+                    "       agent_status, agent_last_action, frozen, updated_at"
                     " FROM dashboard_state WHERE id = 1"
                 ).fetchone()
         except Exception:
@@ -130,6 +142,7 @@ class ObservabilityTUI(App):
             time_range_minutes,
             agent_status,
             agent_last_action,
+            frozen,
             updated_at,
         ) = row
         try:
@@ -150,6 +163,7 @@ class ObservabilityTUI(App):
                 time_range_minutes=cast(TimeRange, int(time_range_minutes) if time_range_minutes else 30),
                 agent_status=agent_status or "idle",
                 agent_last_action=agent_last_action or "",
+                frozen=bool(frozen),
                 updated_at=updated_at or 0.0,
             )
         except Exception:
@@ -178,10 +192,11 @@ class ObservabilityTUI(App):
                 )
                 seen_groups.add(panel.group)
 
-        # Refresh visible panels
-        for panel in self._panels:
-            if panel.panel_id in visible:
-                panel.poll(state)
+        # Refresh visible panels (skipped when frozen)
+        if not state.frozen:
+            for panel in self._panels:
+                if panel.panel_id in visible:
+                    panel.poll(state)
 
         self._poll_agent_status(state)
 
@@ -193,7 +208,7 @@ class ObservabilityTUI(App):
         else:
             time_part = ""
 
-        parts = [f"Agent: {state.agent_status}"]
+        parts = ["[FROZEN]" if state.frozen else "", f"Agent: {state.agent_status}"]
         if state.agent_last_action:
             parts.append(f"— {state.agent_last_action}")
         parts.append(time_part)
