@@ -5,8 +5,15 @@ import sqlite3
 import threading
 import time
 
-SERVICES = ["api-gateway", "payment-service", "user-service", "inventory-service"]
+SERVICES = ["api-gateway", "payment-service", "user-service", "inventory-service", "agent-app", "llm-router"]
 METRICS = ["latency_p99", "error_rate", "req_per_sec", "cpu_usage"]
+
+# Services active per scenario (others are omitted from generated data)
+_SCENARIO_SERVICES: dict[int, list[str]] = {
+    1: ["api-gateway", "payment-service", "user-service", "inventory-service"],
+    2: ["api-gateway", "payment-service", "user-service", "inventory-service"],
+    3: ["agent-app", "llm-router"],
+}
 
 # Healthy baseline values
 _BASE: dict[str, dict[str, float]] = {
@@ -33,6 +40,18 @@ _BASE: dict[str, dict[str, float]] = {
         "error_rate": 0.005,
         "req_per_sec": 150.0,
         "cpu_usage": 0.25,
+    },
+    "agent-app": {
+        "latency_p99": 800.0,
+        "error_rate": 0.005,
+        "req_per_sec": 40.0,
+        "cpu_usage": 0.25,
+    },
+    "llm-router": {
+        "latency_p99": 1200.0,
+        "error_rate": 0.01,
+        "req_per_sec": 40.0,
+        "cpu_usage": 0.30,
     },
 }
 
@@ -124,6 +143,58 @@ _LOG_MSGS: dict[str, dict[str, list[str]]] = {
             "Out of memory: kill process user-service pid={pid}",
         ],
     },
+    "agent-app": {
+        "DEBUG": [
+            "Dispatching LLM request: task-{txn}",
+            "LLM response received: task-{txn} in {latency}ms",
+            "Routing request to llm-router",
+            "Prompt tokens: {n}, max_tokens: 2048",
+        ],
+        "INFO": [
+            "Agent task complete: task-{txn} in {latency}ms",
+            "LLM call succeeded: task-{txn}",
+            "Queue depth: {pool} pending requests",
+            "Throughput: {n} tasks/min",
+        ],
+        "WARN": [
+            "LLM response slow: {latency}ms (threshold 2000ms)",
+            "Retry {pool}/3: llm-router timeout task-{txn}",
+            "Pending LLM requests: {n} (elevated)",
+            "Agent task delayed: task-{txn} waiting {latency}ms",
+        ],
+        "ERROR": [
+            "LLM request failed: task-{txn} — rate limit",
+            "llm-router returned 429: task-{txn}",
+            "Agent task timeout: task-{txn} exceeded {latency}ms",
+            "Max retries exceeded: dropping task-{txn}",
+        ],
+    },
+    "llm-router": {
+        "DEBUG": [
+            "Forwarding request to LLM provider: req-{txn}",
+            "Queue depth: {pool} pending",
+            "Provider response: req-{txn} tokens={n}",
+            "Cache lookup: prompt hash {txn}",
+        ],
+        "INFO": [
+            "LLM request complete: req-{txn} in {latency}ms",
+            "Provider: OK tokens={n} latency={latency}ms",
+            "Queue flushed: {n} requests dispatched",
+            "Rate limit budget: {pool}% remaining",
+        ],
+        "WARN": [
+            "Rate limit approaching: {pool}% of quota used",
+            "Provider latency elevated: {latency}ms",
+            "Queue depth high: {n} pending requests",
+            "Throttling request: req-{txn} delay={latency}ms",
+        ],
+        "ERROR": [
+            "429 Too Many Requests from LLM provider: req-{txn}",
+            "Rate limit exceeded: dropping req-{txn}",
+            "Provider error 429: retry after {latency}ms",
+            "Quota exhausted: all requests queued",
+        ],
+    },
     "inventory-service": {
         "DEBUG": [
             "Inventory lookup: product-{pid}",
@@ -195,6 +266,33 @@ def _compute_metric(service: str, metric: str, minutes: float, scenario: int) ->
             elif metric == "error_rate" and minutes >= 21:
                 base = _lerp(0.005, 0.03, (minutes - 21) / 5.0)
 
+    # Scenario 3: LLM Rate Limiting — traffic spike → 429s → latency cascade
+    elif scenario == 3:
+        if service == "agent-app":
+            # Traffic climbs from minute 10
+            if metric == "req_per_sec" and minutes >= 10:
+                base = _lerp(40.0, 160.0, (minutes - 10) / 8.0)
+            # Latency climbs from minute 16 (after llm-router starts 429ing)
+            elif metric == "latency_p99" and minutes >= 16:
+                base = _lerp(800.0, 8000.0, (minutes - 16) / 8.0)
+            # Small error rate rise from dropped tasks
+            elif metric == "error_rate" and minutes >= 20:
+                base = _lerp(0.005, 0.04, (minutes - 20) / 6.0)
+            elif metric == "cpu_usage" and minutes >= 10:
+                base = _lerp(0.25, 0.55, (minutes - 10) / 10.0)
+        elif service == "llm-router":
+            # Request volume follows agent-app from minute 10
+            if metric == "req_per_sec" and minutes >= 10:
+                base = _lerp(40.0, 160.0, (minutes - 10) / 8.0)
+            # 429 errors start at minute 15 when quota exhausted
+            elif metric == "error_rate" and minutes >= 15:
+                base = _lerp(0.01, 0.45, (minutes - 15) / 5.0)
+            # Latency spikes from queuing + retry backoff
+            elif metric == "latency_p99" and minutes >= 15:
+                base = _lerp(1200.0, 18000.0, (minutes - 15) / 6.0)
+            elif metric == "cpu_usage" and minutes >= 10:
+                base = _lerp(0.30, 0.65, (minutes - 10) / 10.0)
+
     # Scenario 2: Memory Leak — user-service slow-burn OOM, restart, resume
     elif scenario == 2 and service == "user-service":
         # CPU climbs from minute 10
@@ -255,6 +353,31 @@ def _anomaly_log(
                 ]
             )
             return ("ERROR", _fmt(msg))
+    elif scenario == 3:
+        if service == "llm-router" and minutes >= 15 and random.random() < 0.45:
+            msg = random.choice(
+                [
+                    "429 Too Many Requests from LLM provider: req-{txn}",
+                    "Rate limit exceeded: dropping req-{txn}",
+                    "Provider error 429: retry after {latency}ms",
+                    "Quota exhausted: all requests queued",
+                    "Queue depth high: {n} pending requests",
+                ]
+            )
+            level = "ERROR" if "429" in msg or "exceeded" in msg or "Quota" in msg else "WARN"
+            return (level, _fmt(msg))
+        if service == "agent-app" and minutes >= 16 and random.random() < 0.35:
+            msg = random.choice(
+                [
+                    "llm-router returned 429: task-{txn}",
+                    "LLM request failed: task-{txn} — rate limit",
+                    "Retry {pool}/3: llm-router timeout task-{txn}",
+                    "Agent task delayed: task-{txn} waiting {latency}ms",
+                    "Max retries exceeded: dropping task-{txn}",
+                ]
+            )
+            level = "ERROR" if "failed" in msg or "exceeded" in msg or "429" in msg else "WARN"
+            return (level, _fmt(msg))
     elif scenario == 2:
         if service == "user-service":
             if 22 <= minutes < 26 and random.random() < 0.50:
@@ -321,7 +444,7 @@ def _ensure_scenario(minutes: int = 30) -> tuple[float, int]:
         if _demo_epoch is None:
             _demo_epoch = time.time() - minutes * 60
         if _scenario is None:
-            _scenario = random.randint(1, 2)
+            _scenario = random.randint(1, 3)
         return _demo_epoch, _scenario
 
 
@@ -329,7 +452,7 @@ def reset_scenario(scenario: int | None = None) -> None:
     """Force a new scenario (call before backfill on fresh start).
 
     Args:
-        scenario: 1 = Cascade Failure, 2 = Memory Leak, None = random.
+        scenario: 1 = Cascade Failure, 2 = Memory Leak, 3 = LLM Rate Limit, None = random.
     """
     global _demo_epoch, _scenario
     with _state_lock:
@@ -348,10 +471,12 @@ def backfill(db_path: str, minutes: int = 30, resolution_sec: int = 5) -> None:
     metric_rows: list[tuple] = []
     log_rows: list[tuple] = []
 
+    active_services = _SCENARIO_SERVICES.get(scenario, SERVICES)
+
     t = demo_epoch
     while t <= now:
         mins = (t - demo_epoch) / 60.0
-        for service in SERVICES:
+        for service in active_services:
             mv: dict[str, float] = {}
             for metric in METRICS:
                 v = _compute_metric(service, metric, mins, scenario)
@@ -381,6 +506,7 @@ def stream(
 ) -> None:
     """Generate live data points until `stop_event` is set (or forever)."""
     demo_epoch, scenario = _ensure_scenario()
+    active_services = _SCENARIO_SERVICES.get(scenario, SERVICES)
 
     while stop_event is None or not stop_event.is_set():
         now = time.time()
@@ -389,7 +515,7 @@ def stream(
         metric_rows: list[tuple] = []
         log_rows: list[tuple] = []
 
-        for service in SERVICES:
+        for service in active_services:
             mv: dict[str, float] = {}
             for metric in METRICS:
                 v = _compute_metric(service, metric, mins, scenario)

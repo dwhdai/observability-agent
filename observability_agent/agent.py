@@ -27,20 +27,33 @@ class Deps:
 # ── Dynamic data discovery ────────────────────────────────────────────────────
 
 _ELABORATE_TRIGGERS = {
-    "elaborate", "explain", "tell me more", "detail",
-    "describe", "walk me through", "breakdown", "deep dive",
+    "elaborate",
+    "explain",
+    "tell me more",
+    "detail",
+    "describe",
+    "walk me through",
+    "breakdown",
+    "deep dive",
 }
 
 
 def _get_available_data(db_path: str) -> tuple[list[str], list[str]]:
     """Query DB for distinct services and metrics."""
-    try:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
-            services = [r[0] for r in conn.execute("SELECT DISTINCT service FROM metrics ORDER BY service").fetchall()]
-            metrics = [r[0] for r in conn.execute("SELECT DISTINCT name FROM metrics ORDER BY name").fetchall()]
-        return services or [], metrics or []
-    except Exception:
-        return [], []
+    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+        services = [
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT service FROM metrics ORDER BY service"
+            ).fetchall()
+        ]
+        metrics = [
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT name FROM metrics ORDER BY name"
+            ).fetchall()
+        ]
+    return services or [], metrics or []
 
 
 # ── System prompt ─────────────────────────────────────────────────────────────
@@ -154,10 +167,23 @@ _USAGE_LIMITS = UsageLimits(request_limit=25)
 
 
 _BLOCKED_PATTERNS = [
-    "import os", "import sys", "import subprocess", "import socket",
-    "import urllib", "import http", "import requests", "import pathlib",
-    "import shutil", "import glob", "open(", "__import__", "exec(",
-    "eval(", "compile(", "__builtins__", "importlib",
+    "import os",
+    "import sys",
+    "import subprocess",
+    "import socket",
+    "import urllib",
+    "import http",
+    "import requests",
+    "import pathlib",
+    "import shutil",
+    "import glob",
+    "open(",
+    "__import__",
+    "exec(",
+    "eval(",
+    "compile(",
+    "__builtins__",
+    "importlib",
 ]
 
 
@@ -195,7 +221,9 @@ def _run_analysis(ctx: RunContext[Deps], sql: str, script: str | None = None) ->
 
     db_path = ctx.deps.db_path
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+        conn = sqlite3.connect(
+            f"file:{db_path}?mode=ro", uri=True, check_same_thread=False
+        )
         result: dict = {}
 
         cap = 500 if script is not None else 100
@@ -225,12 +253,14 @@ def _run_analysis(ctx: RunContext[Deps], sql: str, script: str | None = None) ->
         rows = result["rows"]
 
         if script is None:
-            return json.dumps({
-                "success": True,
-                "columns": columns,
-                "row_count": len(rows),
-                "sample": rows[:3],
-            })
+            return json.dumps(
+                {
+                    "success": True,
+                    "columns": columns,
+                    "row_count": len(rows),
+                    "sample": rows[:3],
+                }
+            )
 
         # Run summarization script
         stdin_payload = json.dumps({"columns": columns, "rows": rows})
@@ -246,7 +276,12 @@ def _run_analysis(ctx: RunContext[Deps], sql: str, script: str | None = None) ->
             return json.dumps({"success": False, "error": "script timeout (5s)"})
 
         if proc.returncode != 0:
-            return json.dumps({"success": False, "error": f"script error: {proc.stderr.strip()[:500]}"})
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": f"script error: {proc.stderr.strip()[:500]}",
+                }
+            )
 
         raw = proc.stdout.strip()
         try:
@@ -338,15 +373,19 @@ def run_agent() -> None:
                 usage_limits=_USAGE_LIMITS,
             )
             output: AgentResponse = result.output
-            _trace_logger.info(json.dumps({
-                "timestamp": time.time(),
-                "model": _MODEL,
-                "query": user_input,
-                "accepted": output.accepted,
-                "rejection_reason": output.rejection_reason,
-                "response": output.response,
-                "messages": json.loads(result.new_messages_json()),
-            }))
+            _trace_logger.info(
+                json.dumps(
+                    {
+                        "timestamp": time.time(),
+                        "model": _MODEL,
+                        "query": user_input,
+                        "accepted": output.accepted,
+                        "rejection_reason": output.rejection_reason,
+                        "response": output.response,
+                        "messages": json.loads(result.new_messages_json()),
+                    }
+                )
+            )
             print(output.response)
             history = result.all_messages()
         except UsageLimitExceeded:
