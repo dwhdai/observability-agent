@@ -6,10 +6,10 @@ install:
 	pip install -e .
 
 tui:
-	python -m observability_agent tui $(if $(SCENARIO),--scenario $(SCENARIO),)
+	python -m observability_agent.app tui $(if $(SCENARIO),--scenario $(SCENARIO),)
 
 agent:
-	python -m observability_agent agent
+	python -m observability_agent.app agent
 
 # ── Dashboard state test helpers (run while TUI is open) ────────────────────
 

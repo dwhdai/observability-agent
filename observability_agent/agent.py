@@ -8,11 +8,19 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import BaseModel
 from pydantic_ai import Agent, RunContext, UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
 
 from observability_agent.db import get_db_path
+from observability_agent.models import (
+    AgentResponse,
+    AgentStatus,
+    LogLevel,
+    MetricName,
+    PanelName,
+    ServiceFilter,
+    TimeRange,
+)
 
 # ── Deps ─────────────────────────────────────────────────────────────────────
 
@@ -20,15 +28,6 @@ from observability_agent.db import get_db_path
 @dataclass
 class Deps:
     db_path: str
-
-
-# ── Structured output ─────────────────────────────────────────────────────────
-
-
-class AgentResponse(BaseModel):
-    accepted: bool
-    rejection_reason: str | None
-    response: str
 
 
 # ── Dynamic data discovery ────────────────────────────────────────────────────
@@ -92,16 +91,14 @@ Metrics: {metrics_str}
 
 ### dashboard_state  (single row, id = 1)
   panels              TEXT   JSON array — controls visible panels: "overview","timeseries","histogram","logs"
-  timeseries_metric   TEXT   metric shown in the time-series chart
-  timeseries_service  TEXT   service filter for chart ("all" = all services)
-  histogram_metric    TEXT   metric shown in the histogram
-  histogram_service   TEXT   service filter for histogram
+  timeseries_metric   TEXT   metric shown in both the time-series chart and histogram
+  timeseries_service  TEXT   service filter for both charts ("all" = all services)
   log_level           TEXT   log level filter ("all" or DEBUG/INFO/WARN/ERROR)
   log_keyword         TEXT   substring filter on log message (empty = no filter)
   log_service         TEXT   service filter for logs ("all" = all services)
-  time_range_minutes  INT    how many minutes of history to show (5/10/15/30)
-  agent_status        TEXT   shown in TUI status bar — set to describe what you're doing
-  agent_last_action   TEXT   shown in TUI status bar — set to describe your last action
+  time_range_minutes  INT    history window in minutes — 5, 10, 15, or 30
+  agent_status        TEXT   one of: idle/thinking/querying/done/error — shown in TUI footer
+  agent_last_action   TEXT   human-readable description of last action shown in TUI footer
 
 ## Health thresholds
 - latency_p99:  >100ms warn,  >300ms critical
@@ -176,31 +173,29 @@ def _run_query(ctx: RunContext[Deps], sql: str) -> str:
 
 def _update_dashboard(
     ctx: RunContext[Deps],
-    panels: list[str] | None = None,
-    timeseries_metric: str | None = None,
-    timeseries_service: str | None = None,
-    histogram_metric: str | None = None,
-    histogram_service: str | None = None,
-    log_level: str | None = None,
+    panels: list[PanelName] | None = None,
+    timeseries_metric: MetricName | None = None,
+    timeseries_service: ServiceFilter | None = None,
+    log_level: LogLevel | None = None,
     log_keyword: str | None = None,
-    log_service: str | None = None,
-    time_range_minutes: int | None = None,
-    agent_status: str | None = None,
+    log_service: ServiceFilter | None = None,
+    time_range_minutes: TimeRange | None = None,
+    agent_status: AgentStatus | None = None,
     agent_last_action: str | None = None,
 ) -> str:
     """Update the TUI dashboard state. Only supplied fields are changed (merge semantics).
 
-    panels: list of visible panels — any of ["overview","timeseries","histogram","logs"]
-    timeseries_metric / timeseries_service: what the time-series chart shows
-    histogram_metric / histogram_service: what the histogram shows
+    panels: visible panels — any subset of ["overview","timeseries","histogram","logs"]
+    timeseries_metric: metric shown in both charts — latency_p99/error_rate/req_per_sec/cpu_usage
+    timeseries_service: service filter for both charts ("all" = all services)
     log_level: "all" or DEBUG/INFO/WARN/ERROR
     log_keyword: substring filter on log messages (empty = no filter)
-    log_service: "all" or a specific service name
-    time_range_minutes: 5, 10, 15, or 30
-    agent_status: short status string shown in TUI footer
-    agent_last_action: description of last action shown in TUI footer
+    log_service: service filter for logs ("all" or a specific service name)
+    time_range_minutes: history window — 5, 10, 15, or 30
+    agent_status: idle/thinking/querying/done/error — shown in TUI footer
+    agent_last_action: human-readable description of last action shown in TUI footer
     """
-    fields: dict = {k: v for k, v in locals().items() if k not in ("ctx",) and v is not None}
+    fields: dict = {k: v for k, v in locals().items() if k != "ctx" and v is not None}
     if "panels" in fields:
         fields["panels"] = json.dumps(fields["panels"])
     fields["updated_at"] = time.time()

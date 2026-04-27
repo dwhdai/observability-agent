@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-observability-agent = "observability_agent.__main__:main"
+observability-agent = "observability_agent.app:main"
 
 [build-system]
 requires = ["hatchling"]

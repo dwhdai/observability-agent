@@ -1,4 +1,5 @@
 """Database initialisation and helpers."""
+import json
 import sqlite3
 from pathlib import Path
 
@@ -62,39 +63,32 @@ def init_db(db_path: str | None = None) -> None:
         conn.execute("INSERT OR IGNORE INTO dashboard_state (id) VALUES (1)")
 
 
-_DEFAULT_STATE = {
-    "panels": '["overview","timeseries","histogram","logs"]',
-    "timeseries_metric": "latency_p99",
-    "timeseries_service": "all",
-    "histogram_metric": "latency_p99",
-    "histogram_service": "all",
-    "log_level": "all",
-    "log_keyword": "",
-    "log_service": "all",
-    "time_range_minutes": 30,
-    "agent_status": "idle",
-    "agent_last_action": "",
-}
-
-
 def reset_dashboard_state(db_path: str | None = None) -> None:
     """Reset dashboard_state to defaults (call on TUI startup or user request)."""
+    from observability_agent.models import DashboardState
     if db_path is None:
         db_path = get_db_path()
+    s = DashboardState()
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             """UPDATE dashboard_state SET
-                panels              = :panels,
-                timeseries_metric   = :timeseries_metric,
-                timeseries_service  = :timeseries_service,
-                histogram_metric    = :histogram_metric,
-                histogram_service   = :histogram_service,
-                log_level           = :log_level,
-                log_keyword         = :log_keyword,
-                log_service         = :log_service,
-                time_range_minutes  = :time_range_minutes,
-                agent_status        = :agent_status,
-                agent_last_action   = :agent_last_action
+                panels              = ?,
+                timeseries_metric   = ?,
+                timeseries_service  = ?,
+                histogram_metric    = ?,
+                histogram_service   = ?,
+                log_level           = ?,
+                log_keyword         = ?,
+                log_service         = ?,
+                time_range_minutes  = ?,
+                agent_status        = ?,
+                agent_last_action   = ?
             WHERE id = 1""",
-            _DEFAULT_STATE,
+            (
+                json.dumps(s.panels),
+                s.timeseries_metric, s.timeseries_service,
+                s.timeseries_metric, s.timeseries_service,  # histogram mirrors timeseries
+                s.log_level, s.log_keyword, s.log_service,
+                s.time_range_minutes, s.agent_status, s.agent_last_action,
+            ),
         )
